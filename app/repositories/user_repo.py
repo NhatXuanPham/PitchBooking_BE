@@ -46,6 +46,10 @@ class UserRepository:
         return result.scalar_one_or_none()
 
     async def create(self, db: AsyncSession, **kwargs) -> User:
+        if "email" in kwargs and kwargs["email"]:
+            kwargs["email"] = kwargs["email"].strip().lower()
+        if "username" in kwargs and kwargs["username"]:
+            kwargs["username"] = kwargs["username"].strip()
         user = User(**kwargs)
         db.add(user)
         await db.commit()

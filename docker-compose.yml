@@ -12,7 +12,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-pitchbooking}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d pitchbooking"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-pitchbooking}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -27,7 +27,8 @@ services:
     container_name: pitchbooking-app
     restart: unless-stopped
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     ports:
       - "8000:8000"
     environment:

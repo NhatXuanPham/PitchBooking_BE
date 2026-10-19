@@ -1,7 +1,8 @@
 import uuid
+from datetime import datetime, timezone
 
 import httpx
-from fastapi import HTTPException
+from fastapi import HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,7 +17,6 @@ from app.models.user import User
 from app.repositories.token_repo import refresh_token_repo
 from app.repositories.user_repo import user_repo
 from app.schemas.auth_schema import (
-    AccessTokenResponse,
     RefreshTokenRequest,
     RegisterRequest,
     TokenResponse,
@@ -26,9 +26,15 @@ from app.schemas.auth_schema import (
 class AuthService:
     async def register(self, db: AsyncSession, data: RegisterRequest) -> User:
         if data.email and await user_repo.get_by_email(db, data.email):
-            raise HTTPException(status_code=400, detail="Email has already been registered")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email has already been registered",
+            )
         if await user_repo.get_by_username(db, data.username):
-            raise HTTPException(status_code=400, detail="Username has already been used")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Username has already been used",
+            )
 
         return await user_repo.create(
             db,
@@ -40,59 +46,125 @@ class AuthService:
     async def login(self, db: AsyncSession, form_data: OAuth2PasswordRequestForm) -> TokenResponse:
         user = await user_repo.get_by_email_or_username(db, form_data.username)
         if not user or not verify_password(form_data.password, user.password_hash):
-            raise HTTPException(status_code=401, detail="Email or password is incorrect")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Email or password is incorrect",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
         if not user.is_active:
-            raise HTTPException(status_code=403, detail="Account has been disabled")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Account has been disabled",
+            )
 
         return await self.issue_tokens(db, user)
 
     async def logout(self, db: AsyncSession, refresh_token: str) -> None:
         rt = await refresh_token_repo.get_by_token(db, refresh_token)
         if not rt or rt.revoked:
-            raise HTTPException(status_code=400, detail="Refresh token is invalid")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Refresh token is invalid or already revoked",
+            )
         await refresh_token_repo.revoke(db, refresh_token)
 
-    async def logout_all(self, db: AsyncSession, user_id: uuid.UUID) -> None:
+    async def logout_all(self, db: AsyncSession, user_id: int) -> None:
         await refresh_token_repo.revoke_all_by_user(db, user_id)
 
-    async def refresh_access_token(self, db: AsyncSession, refresh_token_data: RefreshTokenRequest) -> AccessTokenResponse:
+    async def refresh_access_token(
+        self,
+        db: AsyncSession,
+        refresh_token_data: RefreshTokenRequest,
+    ) -> TokenResponse:
+        # Validate JWT signature and expiration
         verify_refresh_token(refresh_token_data.refresh_token)
 
         rt = await refresh_token_repo.get_by_token(db, refresh_token_data.refresh_token)
-        if not rt or rt.revoked:
-            raise HTTPException(status_code=401, detail="Refresh token is invalid")
+        now = datetime.now(timezone.utc)
+        if not rt or rt.revoked or rt.expires_at < now:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Refresh token is invalid, expired or revoked",
+            )
 
-        access_token, expires_at = create_token(rt.user_id, "access")
-        return AccessTokenResponse(access_token=access_token, expires_at=expires_at)
+        user = await user_repo.get_by_id(db, rt.user_id)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found",
+            )
+        if not user.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Account has been disabled",
+            )
+
+        # Refresh token rotation: revoke old token and issue new token pair
+        await refresh_token_repo.revoke(db, refresh_token_data.refresh_token)
+        return await self.issue_tokens(db, user)
 
     async def google_exchange(self, db: AsyncSession, code: str) -> TokenResponse:
-        response = httpx.post(
-            "https://oauth2.googleapis.com/token",
-            data={
-                "code": code,
-                "client_id": settings.GOOGLE_CLIENT_ID,
-                "client_secret": settings.GOOGLE_CLIENT_SECRET,
-                "redirect_uri": settings.GOOGLE_REDIRECT_URI,
-                "grant_type": "authorization_code",
-            },
-        )
-        token_data = response.json()
-        if "error" in token_data:
-            raise HTTPException(status_code=400, detail="Google OAuth failed")
+        if not settings.GOOGLE_CLIENT_ID or not settings.GOOGLE_CLIENT_SECRET:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Google OAuth is not configured",
+            )
 
-        user_info = httpx.get(
-            "https://www.googleapis.com/oauth2/v2/userinfo",
-            headers={"Authorization": f"Bearer {token_data['access_token']}"},
-        ).json()
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            token_response = await client.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "code": code,
+                    "client_id": settings.GOOGLE_CLIENT_ID,
+                    "client_secret": settings.GOOGLE_CLIENT_SECRET,
+                    "redirect_uri": settings.GOOGLE_REDIRECT_URI,
+                    "grant_type": "authorization_code",
+                },
+            )
+            if token_response.status_code != 200:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Failed to exchange authorization code with Google",
+                )
 
-        email = user_info["email"]
+            token_data = token_response.json()
+            if "access_token" not in token_data:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Google OAuth did not return an access token",
+                )
+
+            user_info_resp = await client.get(
+                "https://www.googleapis.com/oauth2/v2/userinfo",
+                headers={"Authorization": f"Bearer {token_data['access_token']}"},
+            )
+            if user_info_resp.status_code != 200:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Failed to fetch user profile from Google",
+                )
+            user_info = user_info_resp.json()
+
+        email = user_info.get("email")
+        if not email:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Google account must have an email",
+            )
+
         user = await user_repo.get_by_email(db, email)
         if not user:
             user = await user_repo.create(
                 db,
-                username=email.split("@")[0] + "_" + str(uuid.uuid4())[:6],
+                username=email.split("@")[0] + "_" + uuid.uuid4().hex[:6],
                 email=email,
                 password_hash=hash_password(uuid.uuid4().hex),
+            )
+
+        if not user.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Account has been disabled",
             )
 
         return await self.issue_tokens(db, user)

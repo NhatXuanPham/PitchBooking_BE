@@ -2,9 +2,9 @@
 
 set ENV_NAME=pitchbooking
 
-echo Creating Conda environment...
+echo Creating or updating Conda environment...
 
-call conda env create -f environment.yml
+call conda env update -f environment.yml --prune || call conda env create -f environment.yml
 
 echo Installing Python dependencies...
 

@@ -4,11 +4,9 @@ set -e
 
 ENV_NAME="pitchbooking"
 
-echo "Creating Conda environment..."
+echo "Creating or updating Conda environment..."
 
-conda env create -f environment.yml || {
-    echo "Environment may already exist."
-}
+conda env update -f environment.yml --prune || conda env create -f environment.yml
 
 echo "Installing Python dependencies..."
 

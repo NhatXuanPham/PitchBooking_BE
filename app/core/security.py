@@ -1,23 +1,20 @@
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from pwdlib import PasswordHash
 
 from app.core.config import settings
 
-
-oauth2_scheme = OAuth2PasswordBearer(
-    tokenUrl="/api/v1/login"
-)
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
 password_hash = PasswordHash.recommended()
 
 
 def create_token(
-    user_id: uuid.UUID,
+    user_id: int | str,
     token_type: str,
 ) -> tuple[str, datetime]:
     now = datetime.now(timezone.utc)
@@ -63,16 +60,18 @@ def decode_token(
 
         if payload.get("type") != token_type:
             raise HTTPException(
-                status_code=401,
+                status_code=status.HTTP_401_UNAUTHORIZED,
                 detail=f"Expected {token_type} token",
+                headers={"WWW-Authenticate": "Bearer"},
             )
 
         return payload
 
     except JWTError:
         raise HTTPException(
-            status_code=401,
-            detail="Invalid token",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
         )
 
 
@@ -86,7 +85,7 @@ def verify_access_token(
 
 
 def verify_refresh_token(
-    token: str = Depends(oauth2_scheme),
+    token: str,
 ) -> dict:
     return decode_token(
         token,

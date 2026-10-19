@@ -1,6 +1,7 @@
 from app.core.database import Base, TimestampMixin
-from app.models.user import User
+from app.models.enum import UserRole
 from app.models.refresh_token import RefreshToken
+from app.models.user import User
 
 __all__ = [
     "Base",
@@ -8,10 +9,4 @@ __all__ = [
     "User",
     "RefreshToken",
     "UserRole",
-    "Provider",
-    "Model",
-    "ApiKey",
-    "Route",
-    "RouteModel",
-    "RequestLog",
 ]
