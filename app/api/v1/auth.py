@@ -1,4 +1,7 @@
-from fastapi import APIRouter, Depends, status
+from urllib.parse import urlencode
+
+# pyrefly: ignore[missing-import]
+from fastapi import APIRouter, BackgroundTasks, Depends, status
 from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -7,23 +10,47 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.security import verify_access_token
 from app.schemas.auth_schema import (
+    ForgotPasswordRequest,
     GoogleExchangeRequest,
+    MessageResponse,
     RefreshTokenRequest,
     RegisterRequest,
+    RegisterResponse,
+    ResendOtpRequest,
+    ResetPasswordRequest,
     TokenResponse,
+    VerifyEmailRequest,
+    VerifyEmailResponse,
 )
 from app.services.auth_service import auth_service
 
 router = APIRouter()
 
 
-@router.post("/register", status_code=status.HTTP_201_CREATED)
+@router.post("/register", status_code=status.HTTP_201_CREATED, response_model=RegisterResponse)
 async def register_user(
     data: RegisterRequest,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
-    user = await auth_service.register(db, data)
-    return {"message": "Registration successful", "user_id": user.id}
+    return await auth_service.register(db, data, background_tasks)
+
+
+@router.post("/verify-email", response_model=VerifyEmailResponse)
+async def verify_email(
+    data: VerifyEmailRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    return await auth_service.verify_email(db, data.email, data.otp)
+
+
+@router.post("/resend-otp", response_model=MessageResponse)
+async def resend_otp(
+    data: ResendOtpRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    return await auth_service.resend_otp(db, data.email, data.purpose, background_tasks)
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -42,7 +69,7 @@ async def refresh_token(
     return await auth_service.refresh_access_token(db, refresh_token_data)
 
 
-@router.post("/logout")
+@router.post("/logout", response_model=MessageResponse)
 async def logout(
     data: RefreshTokenRequest,
     db: AsyncSession = Depends(get_db),
@@ -51,7 +78,7 @@ async def logout(
     return {"message": "Logged out successfully"}
 
 
-@router.post("/logout-all")
+@router.post("/logout-all", response_model=MessageResponse)
 async def logout_all(
     db: AsyncSession = Depends(get_db),
     payload: dict = Depends(verify_access_token),
@@ -62,14 +89,15 @@ async def logout_all(
 
 @router.get("/google/login")
 def google_login():
-    google_auth_url = (
-        "https://accounts.google.com/o/oauth2/v2/auth"
-        f"?client_id={settings.GOOGLE_CLIENT_ID}"
-        f"&redirect_uri={settings.GOOGLE_REDIRECT_URI}"
-        "&response_type=code"
-        "&scope=openid email profile"
+    query = urlencode(
+        {
+            "client_id": settings.GOOGLE_CLIENT_ID or "",
+            "redirect_uri": settings.GOOGLE_REDIRECT_URI or "",
+            "response_type": "code",
+            "scope": "openid email profile",
+        }
     )
-    return RedirectResponse(google_auth_url)
+    return RedirectResponse(f"https://accounts.google.com/o/oauth2/v2/auth?{query}")
 
 
 @router.post("/google/exchange", response_model=TokenResponse)
@@ -78,3 +106,25 @@ async def google_exchange(
     db: AsyncSession = Depends(get_db),
 ):
     return await auth_service.google_exchange(db, data.code)
+
+
+@router.post("/forgot-password", response_model=MessageResponse)
+async def forgot_password(
+    data: ForgotPasswordRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    return await auth_service.forgot_password(db, data.email, background_tasks)
+
+
+@router.post("/reset-password", response_model=MessageResponse)
+async def reset_password(
+    data: ResetPasswordRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    return await auth_service.reset_password(
+        db,
+        email=data.email,
+        otp=data.otp,
+        new_password=data.new_password,
+    )

@@ -1,3 +1,6 @@
+import hashlib
+import hmac
+import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -26,6 +29,10 @@ def create_token(
     elif token_type == "refresh":
         expires_at = now + timedelta(
             days=settings.REFRESH_TOKEN_EXPIRE_DAYS
+        )
+    elif token_type == "reset_password":
+        expires_at = now + timedelta(
+            minutes=settings.RESET_PASSWORD_TOKEN_EXPIRE_MINUTES
         )
     else:
         raise ValueError(f"Invalid token_type: {token_type}")
@@ -93,6 +100,15 @@ def verify_refresh_token(
     )
 
 
+def verify_reset_password_token(
+    token: str,
+) -> dict:
+    return decode_token(
+        token,
+        token_type="reset_password",
+    )
+
+
 def hash_password(password: str) -> str:
     return password_hash.hash(password)
 
@@ -105,3 +121,24 @@ def verify_password(
         plain_password,
         hashed_password,
     )
+
+
+def generate_otp(length: int = 6) -> str:
+    """Generate a cryptographically secure random N-digit numeric OTP"""
+    return "".join(secrets.choice("0123456789") for _ in range(length))
+
+
+def hash_otp(code: str) -> str:
+    """Compute HMAC-SHA-256 hash of an OTP using secret key"""
+    secret = settings.OTP_SECRET_KEY or settings.SECRET_KEY
+    return hmac.new(
+        secret.encode("utf-8"),
+        code.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def verify_otp_hash(plain_code: str, hashed_code: str) -> bool:
+    """Constant-time verification of an OTP against its HMAC-SHA-256 hash"""
+    computed = hash_otp(plain_code)
+    return hmac.compare_digest(computed, hashed_code)

@@ -33,3 +33,93 @@ async def test_swagger_docs(async_client: AsyncClient):
     response = await async_client.get("/docs")
     assert response.status_code == 200
     assert "Swagger UI" in response.text
+
+
+@pytest.mark.asyncio
+async def test_register_validation_username_with_at_sign(async_client: AsyncClient):
+    response = await async_client.post(
+        "/api/v1/auth/register",
+        json={
+            "username": "someone@example.com",  # '@' is not allowed in usernames
+            "email": "test@example.com",
+            "password": "valid_password_123",
+        },
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_forgot_password_invalid_email(async_client: AsyncClient):
+    response = await async_client.post(
+        "/api/v1/auth/forgot-password",
+        json={"email": "not-an-email"},
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_forgot_password_unknown_email_is_not_revealed(async_client: AsyncClient):
+    response = await async_client.post(
+        "/api/v1/auth/forgot-password",
+        json={"email": "nonexistent_pitch_user@example.com"},
+    )
+    # Generic response: must not reveal whether the email is registered
+    assert response.status_code == 200
+    assert "message" in response.json()
+
+
+@pytest.mark.asyncio
+async def test_resend_otp_unknown_email_is_not_revealed(async_client: AsyncClient):
+    response = await async_client.post(
+        "/api/v1/auth/resend-otp",
+        json={"email": "nonexistent_pitch_user@example.com", "purpose": "REGISTER"},
+    )
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_verify_email_unknown_email(async_client: AsyncClient):
+    response = await async_client.post(
+        "/api/v1/auth/verify-email",
+        json={"email": "nonexistent_pitch_user@example.com", "otp": "123456"},
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_reset_password_unknown_email(async_client: AsyncClient):
+    response = await async_client.post(
+        "/api/v1/auth/reset-password",
+        json={
+            "email": "nonexistent_pitch_user@example.com",
+            "otp": "123456",
+            "new_password": "NewValidPassword123!",
+        },
+    )
+    # Same error as an invalid OTP so the email's existence is not revealed
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_reset_password_missing_otp(async_client: AsyncClient):
+    response = await async_client.post(
+        "/api/v1/auth/reset-password",
+        json={
+            "email": "someone@example.com",
+            "new_password": "NewValidPassword123!",
+        },
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_reset_password_short_password(async_client: AsyncClient):
+    response = await async_client.post(
+        "/api/v1/auth/reset-password",
+        json={
+            "email": "someone@example.com",
+            "otp": "123456",
+            "new_password": "123",
+        },
+    )
+    assert response.status_code == 422

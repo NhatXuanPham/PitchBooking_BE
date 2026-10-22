@@ -16,8 +16,13 @@ class User(TimestampMixin, Base):
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
     role: Mapped[UserRole] = mapped_column(String(50), default=UserRole.CUSTOMER, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    is_email_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     refresh_tokens: Mapped[list["RefreshToken"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    email_otps: Mapped[list["EmailOtp"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
     )

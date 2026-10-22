@@ -1,4 +1,4 @@
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.user import User
@@ -36,12 +36,12 @@ class UserRepository:
         normalized_identifier = self._normalize_identifier(identifier)
         if not normalized_identifier:
             return None
-        stmt = select(User).where(
-            or_(
-                func.lower(User.email) == normalized_identifier,
-                func.lower(User.username) == normalized_identifier,
-            )
-        )
+        # Usernames cannot contain '@', so an identifier with '@' is always an email.
+        # Resolving to a single column avoids MultipleResultsFound on legacy data.
+        if "@" in normalized_identifier:
+            stmt = select(User).where(func.lower(User.email) == normalized_identifier)
+        else:
+            stmt = select(User).where(func.lower(User.username) == normalized_identifier)
         result = await db.execute(stmt)
         return result.scalar_one_or_none()
 
@@ -52,8 +52,14 @@ class UserRepository:
             kwargs["username"] = kwargs["username"].strip()
         user = User(**kwargs)
         db.add(user)
-        await db.commit()
-        await db.refresh(user)
+        # Flush only; the calling service owns the transaction and commits.
+        await db.flush()
+        return user
+
+    async def update_password(self, db: AsyncSession, user: User, password_hash: str) -> User:
+        user.password_hash = password_hash
+        db.add(user)
+        await db.flush()
         return user
 
 

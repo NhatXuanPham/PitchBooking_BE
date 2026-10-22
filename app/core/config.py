@@ -12,9 +12,26 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    RESET_PASSWORD_TOKEN_EXPIRE_MINUTES: int = 15
+
+    # OTP Configuration
+    OTP_SECRET_KEY: str | None = None
+    OTP_EXPIRE_MINUTES: int = 5
+    MAX_OTP_ATTEMPTS: int = 5
+    OTP_RESEND_COOLDOWN_SECONDS: int = 60
 
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/pitchbooking"
+
+    # SMTP / Email Configuration (Gmail)
+    SMTP_HOST: str = "smtp.gmail.com"
+    SMTP_PORT: int = 587
+    SMTP_USER: str | None = None
+    SMTP_PASSWORD: str | None = None
+    SMTP_TLS: bool = True
+    SMTP_SSL: bool = False
+    EMAILS_FROM_EMAIL: str | None = None
+    EMAILS_FROM_NAME: str = "PitchBooking"
 
     # OAuth (optional)
     GOOGLE_CLIENT_ID: str | None = None
