@@ -142,3 +142,11 @@ def verify_otp_hash(plain_code: str, hashed_code: str) -> bool:
     """Constant-time verification of an OTP against its HMAC-SHA-256 hash"""
     computed = hash_otp(plain_code)
     return hmac.compare_digest(computed, hashed_code)
+
+
+def hash_token(token: str) -> str:
+    """
+    SHA-256 hex digest of a token (e.g. a refresh token) for storage at rest.
+    Tokens are high-entropy JWTs, so an unsalted hash is sufficient and still allows lookup.
+    """
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()

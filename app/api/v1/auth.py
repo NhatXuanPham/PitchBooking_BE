@@ -1,13 +1,16 @@
+import hmac
+import secrets
 from urllib.parse import urlencode
 
 # pyrefly: ignore[missing-import]
-from fastapi import APIRouter, BackgroundTasks, Depends, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
 from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.rate_limit import limiter
 from app.core.security import verify_access_token
 from app.schemas.auth_schema import (
     ForgotPasswordRequest,
@@ -26,9 +29,13 @@ from app.services.auth_service import auth_service
 
 router = APIRouter()
 
+# NOTE: endpoints decorated with @limiter.limit must accept a `request: Request` argument.
+
 
 @router.post("/register", status_code=status.HTTP_201_CREATED, response_model=RegisterResponse)
+@limiter.limit(settings.RATE_LIMIT_REGISTER)
 async def register_user(
+    request: Request,
     data: RegisterRequest,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
@@ -37,7 +44,9 @@ async def register_user(
 
 
 @router.post("/verify-email", response_model=VerifyEmailResponse)
+@limiter.limit(settings.RATE_LIMIT_VERIFY_OTP)
 async def verify_email(
+    request: Request,
     data: VerifyEmailRequest,
     db: AsyncSession = Depends(get_db),
 ):
@@ -45,7 +54,9 @@ async def verify_email(
 
 
 @router.post("/resend-otp", response_model=MessageResponse)
+@limiter.limit(settings.RATE_LIMIT_SEND_OTP)
 async def resend_otp(
+    request: Request,
     data: ResendOtpRequest,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
@@ -54,15 +65,19 @@ async def resend_otp(
 
 
 @router.post("/login", response_model=TokenResponse)
+@limiter.limit(settings.RATE_LIMIT_LOGIN)
 async def login_user(
+    request: Request,
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: AsyncSession = Depends(get_db),
 ):
     return await auth_service.login(db, form_data)
 
 
-@router.post("/refreshtoken", response_model=TokenResponse)
+@router.post("/refresh", response_model=TokenResponse)
+@limiter.limit(settings.RATE_LIMIT_REFRESH)
 async def refresh_token(
+    request: Request,
     refresh_token_data: RefreshTokenRequest,
     db: AsyncSession = Depends(get_db),
 ):
@@ -87,29 +102,79 @@ async def logout_all(
     return {"message": "Logged out from all sessions successfully"}
 
 
+# ---------------------------------------------------------------------- #
+# Google OAuth (with `state` bound to the browser via an HttpOnly cookie)
+# ---------------------------------------------------------------------- #
+_OAUTH_COOKIE_PATH = "/api/v1/auth/google"
+
+
+def _oauth_cookie_kwargs() -> dict:
+    # Cross-site FE/BE in production (https) needs SameSite=None; Secure.
+    # Locally (http) the FE and BE are same-site, so Lax works and Secure must be off.
+    secure = settings.BACKEND_URL.startswith("https://")
+    return {
+        "path": _OAUTH_COOKIE_PATH,
+        "httponly": True,
+        "secure": secure,
+        "samesite": "none" if secure else "lax",
+    }
+
+
 @router.get("/google/login")
 def google_login():
+    if not settings.GOOGLE_CLIENT_ID or not settings.GOOGLE_REDIRECT_URI:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Google OAuth is not configured",
+        )
+
+    state = secrets.token_urlsafe(32)
     query = urlencode(
         {
-            "client_id": settings.GOOGLE_CLIENT_ID or "",
-            "redirect_uri": settings.GOOGLE_REDIRECT_URI or "",
+            "client_id": settings.GOOGLE_CLIENT_ID,
+            "redirect_uri": settings.GOOGLE_REDIRECT_URI,
             "response_type": "code",
             "scope": "openid email profile",
+            "state": state,
         }
     )
-    return RedirectResponse(f"https://accounts.google.com/o/oauth2/v2/auth?{query}")
+    response = RedirectResponse(f"https://accounts.google.com/o/oauth2/v2/auth?{query}")
+    response.set_cookie(
+        settings.OAUTH_STATE_COOKIE_NAME,
+        state,
+        max_age=settings.OAUTH_STATE_MAX_AGE_SECONDS,
+        **_oauth_cookie_kwargs(),
+    )
+    return response
 
 
 @router.post("/google/exchange", response_model=TokenResponse)
+@limiter.limit(settings.RATE_LIMIT_LOGIN)
 async def google_exchange(
+    request: Request,
+    response: Response,
     data: GoogleExchangeRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    return await auth_service.google_exchange(db, data.code)
+    # CSRF protection: the state Google echoed back must match the one stored in this
+    # browser's cookie, proving the flow was started by this user (not an attacker's link).
+    expected_state = request.cookies.get(settings.OAUTH_STATE_COOKIE_NAME)
+    if not expected_state or not hmac.compare_digest(expected_state, data.state):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired OAuth state. Please start Google login again.",
+        )
+
+    tokens = await auth_service.google_exchange(db, data.code)
+    # State is single-use
+    response.delete_cookie(settings.OAUTH_STATE_COOKIE_NAME, **_oauth_cookie_kwargs())
+    return tokens
 
 
 @router.post("/forgot-password", response_model=MessageResponse)
+@limiter.limit(settings.RATE_LIMIT_SEND_OTP)
 async def forgot_password(
+    request: Request,
     data: ForgotPasswordRequest,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
@@ -118,7 +183,9 @@ async def forgot_password(
 
 
 @router.post("/reset-password", response_model=MessageResponse)
+@limiter.limit(settings.RATE_LIMIT_VERIFY_OTP)
 async def reset_password(
+    request: Request,
     data: ResetPasswordRequest,
     db: AsyncSession = Depends(get_db),
 ):

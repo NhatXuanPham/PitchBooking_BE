@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.security import hash_token
 from app.models.refresh_token import RefreshToken
 
 
@@ -10,6 +11,9 @@ class RefreshTokenRepository:
     """
     Repository methods only flush; the calling service owns the transaction
     and is responsible for committing.
+
+    Public methods accept the raw refresh token; only its SHA-256 hash is persisted
+    and compared, so a leaked database cannot be used to mint sessions.
     """
 
     async def create(
@@ -21,7 +25,7 @@ class RefreshTokenRepository:
     ) -> RefreshToken:
         refresh_token = RefreshToken(
             user_id=user_id,
-            token=token,
+            token_hash=hash_token(token),
             expires_at=expires_at,
         )
         db.add(refresh_token)
@@ -29,7 +33,7 @@ class RefreshTokenRepository:
         return refresh_token
 
     async def get_by_token(self, db: AsyncSession, token: str) -> RefreshToken | None:
-        stmt = select(RefreshToken).where(RefreshToken.token == token)
+        stmt = select(RefreshToken).where(RefreshToken.token_hash == hash_token(token))
         result = await db.execute(stmt)
         return result.scalar_one_or_none()
 
@@ -38,7 +42,10 @@ class RefreshTokenRepository:
         now = datetime.now(timezone.utc)
         stmt = (
             update(RefreshToken)
-            .where(RefreshToken.token == token, RefreshToken.revoked.is_(False))
+            .where(
+                RefreshToken.token_hash == hash_token(token),
+                RefreshToken.revoked.is_(False),
+            )
             .values(revoked=True, revoked_at=now)
             .execution_options(synchronize_session=False)
         )

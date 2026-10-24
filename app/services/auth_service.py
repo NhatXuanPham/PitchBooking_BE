@@ -408,7 +408,7 @@ class AuthService:
                 )
             user_info = user_info_resp.json()
 
-        email = user_info.get("email")
+        email = (user_info.get("email") or "").strip().lower()
         if not email:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

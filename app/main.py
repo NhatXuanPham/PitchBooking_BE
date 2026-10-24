@@ -1,11 +1,19 @@
+import logging
+
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.router import api_router
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.rate_limit import limiter
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="PitchBooking API",
@@ -13,6 +21,9 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
 )
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 allowed_origins = [settings.FRONTEND_URL] if settings.FRONTEND_URL else ["http://localhost:3000"]
 
@@ -37,5 +48,10 @@ async def check_db(db: AsyncSession = Depends(get_db)):
     try:
         await db.execute(text("SELECT 1"))
         return {"status": "ok", "db": "connected"}
-    except Exception as e:
-        return {"status": "fail", "error": str(e)}
+    except Exception:
+        # Log details server-side only; never expose connection strings/driver errors
+        logger.exception("Database health check failed")
+        return JSONResponse(
+            status_code=503,
+            content={"status": "fail", "db": "unavailable"},
+        )

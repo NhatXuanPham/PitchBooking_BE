@@ -20,6 +20,19 @@ class Settings(BaseSettings):
     MAX_OTP_ATTEMPTS: int = 5
     OTP_RESEND_COOLDOWN_SECONDS: int = 60
 
+    # Rate limiting (per client IP, slowapi/limits syntax)
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_STORAGE_URI: str = "memory://"
+    RATE_LIMIT_LOGIN: str = "5/minute;20/hour"
+    RATE_LIMIT_REGISTER: str = "5/minute"
+    RATE_LIMIT_VERIFY_OTP: str = "10/minute"
+    RATE_LIMIT_SEND_OTP: str = "3/minute;10/hour"
+    RATE_LIMIT_REFRESH: str = "30/minute"
+
+    # Google OAuth state cookie (CSRF protection)
+    OAUTH_STATE_COOKIE_NAME: str = "google_oauth_state"
+    OAUTH_STATE_MAX_AGE_SECONDS: int = 600
+
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/pitchbooking"
 
