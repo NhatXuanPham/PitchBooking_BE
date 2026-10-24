@@ -62,5 +62,14 @@ class UserRepository:
         await db.flush()
         return user
 
+    async def update(self, db: AsyncSession, user: User, **kwargs) -> User:
+        for key, value in kwargs.items():
+            if hasattr(user, key):
+                setattr(user, key, value)
+        db.add(user)
+        await db.flush()
+        return user
+
+
 
 user_repo = UserRepository()

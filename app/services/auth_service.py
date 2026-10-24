@@ -437,15 +437,22 @@ class AuthService:
                     email=email,
                     password_hash=hash_password(uuid.uuid4().hex),
                     is_email_verified=True,
+                    full_name=user_info.get("name"),
+                    avatar_url=user_info.get("picture"),
                 )
             elif not user.is_email_verified:
                 # The unverified account may have been created by someone else using this
                 # email (pre-account takeover). Discard its credentials before linking.
                 user.is_email_verified = True
                 user.password_hash = hash_password(uuid.uuid4().hex)
+                if not user.full_name and user_info.get("name"):
+                    user.full_name = user_info.get("name")
+                if not user.avatar_url and user_info.get("picture"):
+                    user.avatar_url = user_info.get("picture")
                 db.add(user)
                 await otp_repo.invalidate_otps(db, user.id, OtpPurpose.REGISTER)
                 await refresh_token_repo.revoke_all_by_user(db, user.id)
+
 
             tokens = await self.issue_tokens(db, user)
             await db.commit()
