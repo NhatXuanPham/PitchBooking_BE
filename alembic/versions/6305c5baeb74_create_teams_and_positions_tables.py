@@ -1,7 +1,7 @@
 """create_teams_and_positions_tables
 
 Revision ID: 6305c5baeb74
-Revises: a1f4c2d9e7b3
+Revises: 97f000385c5f
 Create Date: 2026-10-24 22:12:30.075479
 
 """
@@ -11,9 +11,10 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision = '6305c5baeb74'
-down_revision = 'a1f4c2d9e7b3'
+down_revision = '97f000385c5f'
 branch_labels = None
 depends_on = None
+
 
 
 def upgrade() -> None:
