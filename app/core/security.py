@@ -4,14 +4,14 @@ import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from pwdlib import PasswordHash
 
 from app.core.config import settings
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=False)
 
 password_hash = PasswordHash.recommended()
 
@@ -83,12 +83,56 @@ def decode_token(
 
 
 def verify_access_token(
-    token: str = Depends(oauth2_scheme),
+    request: Request,
+    bearer_token: str | None = Depends(oauth2_scheme),
 ) -> dict:
+    token = bearer_token or request.cookies.get("access_token")
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     return decode_token(
         token,
         token_type="access",
     )
+
+
+def _cookie_kwargs(path: str = "/") -> dict:
+    secure = settings.BACKEND_URL.startswith("https://")
+    return {
+        "httponly": True,
+        "secure": secure,
+        "samesite": "none" if secure else "lax",
+        "path": path,
+    }
+
+
+def set_auth_cookies(
+    response: Response,
+    access_token: str,
+    refresh_token: str,
+) -> None:
+    """Set HttpOnly cookies for access_token and refresh_token."""
+    response.set_cookie(
+        key="access_token",
+        value=access_token,
+        max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        **_cookie_kwargs(path="/"),
+    )
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
+        **_cookie_kwargs(path="/"),
+    )
+
+
+def delete_auth_cookies(response: Response) -> None:
+    """Clear HttpOnly authentication cookies."""
+    response.delete_cookie(key="access_token", **_cookie_kwargs(path="/"))
+    response.delete_cookie(key="refresh_token", **_cookie_kwargs(path="/"))
 
 
 def verify_refresh_token(
