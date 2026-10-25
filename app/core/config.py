@@ -35,6 +35,7 @@ class Settings(BaseSettings):
 
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/pitchbooking"
+    TEST_DATABASE_URL: str | None = None
 
     # SMTP / Email Configuration (Gmail)
     SMTP_HOST: str = "smtp.gmail.com"
