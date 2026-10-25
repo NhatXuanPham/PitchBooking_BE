@@ -11,7 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.rate_limit import limiter
-from app.core.security import verify_access_token
+from app.core.security import (
+    delete_auth_cookies,
+    set_auth_cookies,
+    verify_access_token,
+)
 from app.schemas.auth_schema import (
     ForgotPasswordRequest,
     GoogleExchangeRequest,
@@ -47,10 +51,15 @@ async def register_user(
 @limiter.limit(settings.RATE_LIMIT_VERIFY_OTP)
 async def verify_email(
     request: Request,
+    response: Response,
     data: VerifyEmailRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    return await auth_service.verify_email(db, data.email, data.otp)
+    result = await auth_service.verify_email(db, data.email, data.otp)
+    tokens = result.get("tokens")
+    if tokens:
+        set_auth_cookies(response, tokens.access_token, tokens.refresh_token)
+    return result
 
 
 @router.post("/resend-otp", response_model=MessageResponse)
@@ -68,37 +77,64 @@ async def resend_otp(
 @limiter.limit(settings.RATE_LIMIT_LOGIN)
 async def login_user(
     request: Request,
+    response: Response,
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: AsyncSession = Depends(get_db),
 ):
-    return await auth_service.login(db, form_data)
+    tokens = await auth_service.login(db, form_data)
+    set_auth_cookies(response, tokens.access_token, tokens.refresh_token)
+    return tokens
 
 
 @router.post("/refresh", response_model=TokenResponse)
 @limiter.limit(settings.RATE_LIMIT_REFRESH)
 async def refresh_token(
     request: Request,
-    refresh_token_data: RefreshTokenRequest,
+    response: Response,
+    refresh_token_data: RefreshTokenRequest | None = None,
     db: AsyncSession = Depends(get_db),
 ):
-    return await auth_service.refresh_access_token(db, refresh_token_data)
+    rt = (
+        (refresh_token_data.refresh_token if refresh_token_data else None)
+        or request.cookies.get("refresh_token")
+    )
+    if not rt:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Refresh token is required in body or cookie",
+        )
+    tokens = await auth_service.refresh_access_token(
+        db, RefreshTokenRequest(refresh_token=rt)
+    )
+    set_auth_cookies(response, tokens.access_token, tokens.refresh_token)
+    return tokens
 
 
 @router.post("/logout", response_model=MessageResponse)
 async def logout(
-    data: RefreshTokenRequest,
+    request: Request,
+    response: Response,
+    data: RefreshTokenRequest | None = None,
     db: AsyncSession = Depends(get_db),
 ):
-    await auth_service.logout(db, data.refresh_token)
+    rt = (data.refresh_token if data else None) or request.cookies.get("refresh_token")
+    if rt:
+        try:
+            await auth_service.logout(db, rt)
+        except HTTPException:
+            pass
+    delete_auth_cookies(response)
     return {"message": "Logged out successfully"}
 
 
 @router.post("/logout-all", response_model=MessageResponse)
 async def logout_all(
+    response: Response,
     db: AsyncSession = Depends(get_db),
     payload: dict = Depends(verify_access_token),
 ):
     await auth_service.logout_all(db, int(payload["sub"]))
+    delete_auth_cookies(response)
     return {"message": "Logged out from all sessions successfully"}
 
 
@@ -168,6 +204,7 @@ async def google_exchange(
     tokens = await auth_service.google_exchange(db, data.code)
     # State is single-use
     response.delete_cookie(settings.OAUTH_STATE_COOKIE_NAME, **_oauth_cookie_kwargs())
+    set_auth_cookies(response, tokens.access_token, tokens.refresh_token)
     return tokens
 
 
