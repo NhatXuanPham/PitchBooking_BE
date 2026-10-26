@@ -1,11 +1,16 @@
+from typing import TYPE_CHECKING
+
 from sqlalchemy import Boolean, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base, TimestampMixin
 
+if TYPE_CHECKING:
+    from app.models.team_member import TeamMember
+    from app.models.user import User
+
 
 class Team(TimestampMixin, Base):
-    """Football Team / Clan model"""
     __tablename__ = "teams"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

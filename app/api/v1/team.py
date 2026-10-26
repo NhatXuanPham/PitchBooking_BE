@@ -48,8 +48,6 @@ async def list_positions(
     return await team_service.list_positions(db, sport_type=sport_type, pitch_type=pitch_type)
 
 
-
-
 @router.post("/", response_model=TeamResponse, status_code=status.HTTP_201_CREATED)
 async def create_team(
     data: TeamCreateRequest,

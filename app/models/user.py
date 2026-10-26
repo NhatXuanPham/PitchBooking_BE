@@ -9,11 +9,10 @@ from app.core.database import Base, TimestampMixin
 if TYPE_CHECKING:
     from app.models.email_otp import EmailOtp
     from app.models.refresh_token import RefreshToken
-
+    from app.models.team_member import TeamMember
 
 
 class User(TimestampMixin, Base):
-    """User model"""
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
@@ -24,7 +23,6 @@ class User(TimestampMixin, Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_email_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
-    # Basic profile information
     full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     phone_number: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
     address: Mapped[str | None] = mapped_column(String(255), nullable=True)

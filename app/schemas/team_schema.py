@@ -24,10 +24,7 @@ class TeamMemberPositionResponse(BaseModel):
     name: str
     is_primary: bool = False
 
-
-
     model_config = {"from_attributes": True}
-
 
 
 class TeamMemberResponse(BaseModel):

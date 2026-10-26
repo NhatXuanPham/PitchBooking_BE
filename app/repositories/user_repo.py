@@ -52,7 +52,6 @@ class UserRepository:
             kwargs["username"] = kwargs["username"].strip()
         user = User(**kwargs)
         db.add(user)
-        # Flush only; the calling service owns the transaction and commits.
         await db.flush()
         return user
 
@@ -69,7 +68,6 @@ class UserRepository:
         db.add(user)
         await db.flush()
         return user
-
 
 
 user_repo = UserRepository()

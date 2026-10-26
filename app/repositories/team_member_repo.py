@@ -4,10 +4,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.enum import TeamMemberStatus, TeamRole
-from app.models.position import Position
 from app.models.team_member import TeamMember
 from app.models.team_member_position import TeamMemberPosition
-
 
 
 class TeamMemberRepository:
@@ -116,9 +114,6 @@ class TeamMemberRepository:
             )
             db.add(assoc)
         await db.flush()
-
-
-
 
     async def update_role(
         self,

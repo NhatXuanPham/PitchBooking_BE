@@ -135,36 +135,20 @@ def delete_auth_cookies(response: Response) -> None:
     response.delete_cookie(key="refresh_token", **_cookie_kwargs(path="/"))
 
 
-def verify_refresh_token(
-    token: str,
-) -> dict:
-    return decode_token(
-        token,
-        token_type="refresh",
-    )
+def verify_refresh_token(token: str) -> dict:
+    return decode_token(token, token_type="refresh")
 
 
-def verify_reset_password_token(
-    token: str,
-) -> dict:
-    return decode_token(
-        token,
-        token_type="reset_password",
-    )
+def verify_reset_password_token(token: str) -> dict:
+    return decode_token(token, token_type="reset_password")
 
 
 def hash_password(password: str) -> str:
     return password_hash.hash(password)
 
 
-def verify_password(
-    plain_password: str,
-    hashed_password: str,
-) -> bool:
-    return password_hash.verify(
-        plain_password,
-        hashed_password,
-    )
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return password_hash.verify(plain_password, hashed_password)
 
 
 def generate_otp(length: int = 6) -> str:

@@ -19,7 +19,6 @@ class TeamRole(str, Enum):
     MEMBER = "MEMBER"
 
 
-
 class TeamMemberStatus(str, Enum):
     ACTIVE = "ACTIVE"
     PENDING = "PENDING"

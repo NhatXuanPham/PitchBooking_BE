@@ -2,7 +2,6 @@ import hmac
 import secrets
 from urllib.parse import urlencode
 
-# pyrefly: ignore[missing-import]
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
 from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm
@@ -32,8 +31,6 @@ from app.schemas.auth_schema import (
 from app.services.auth_service import auth_service
 
 router = APIRouter()
-
-# NOTE: endpoints decorated with @limiter.limit must accept a `request: Request` argument.
 
 
 @router.post("/register", status_code=status.HTTP_201_CREATED, response_model=RegisterResponse)
@@ -138,9 +135,6 @@ async def logout_all(
     return {"message": "Logged out from all sessions successfully"}
 
 
-# ---------------------------------------------------------------------- #
-# Google OAuth (with `state` bound to the browser via an HttpOnly cookie)
-# ---------------------------------------------------------------------- #
 _OAUTH_COOKIE_PATH = "/api/v1/auth/google"
 
 

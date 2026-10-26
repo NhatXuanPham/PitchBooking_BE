@@ -1,11 +1,16 @@
+from typing import TYPE_CHECKING
+
 from sqlalchemy import Boolean, ForeignKey, Integer
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
 
+if TYPE_CHECKING:
+    from app.models.position import Position
+    from app.models.team_member import TeamMember
+
 
 class TeamMemberPosition(Base):
-    """Association table between TeamMember and Position with additional metadata"""
     __tablename__ = "team_member_positions"
 
     team_member_id: Mapped[int] = mapped_column(

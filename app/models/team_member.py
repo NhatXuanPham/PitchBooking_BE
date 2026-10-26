@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -6,9 +7,13 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
 from app.models.enum import TeamMemberStatus, TeamRole
 
+if TYPE_CHECKING:
+    from app.models.team import Team
+    from app.models.team_member_position import TeamMemberPosition
+    from app.models.user import User
+
 
 class TeamMember(Base):
-    """Team member association model"""
     __tablename__ = "team_members"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

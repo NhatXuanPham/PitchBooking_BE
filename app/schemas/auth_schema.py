@@ -34,12 +34,6 @@ class GoogleExchangeRequest(BaseModel):
     state: str = Field(..., min_length=1, max_length=256)
 
 
-class AccessTokenResponse(BaseModel):
-    access_token: str
-    expires_at: datetime
-    token_type: str = "bearer"
-
-
 class RegisterResponse(BaseModel):
     message: str
     email: EmailStr

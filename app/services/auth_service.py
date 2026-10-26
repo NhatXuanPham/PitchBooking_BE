@@ -50,9 +50,6 @@ def _get_dummy_password_hash() -> str:
 
 
 class AuthService:
-    # ------------------------------------------------------------------ #
-    # OTP helpers
-    # ------------------------------------------------------------------ #
     async def _is_in_cooldown(
         self,
         db: AsyncSession,
@@ -137,9 +134,6 @@ class AuthService:
         if not await otp_repo.mark_as_used(db, otp.id, settings.MAX_OTP_ATTEMPTS):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=OTP_LOCKED_MSG)
 
-    # ------------------------------------------------------------------ #
-    # Register / verify
-    # ------------------------------------------------------------------ #
     async def register(
         self,
         db: AsyncSession,
@@ -274,9 +268,6 @@ class AuthService:
         await self._send_otp_email(user, purpose, otp_code, background_tasks)
         return generic
 
-    # ------------------------------------------------------------------ #
-    # Login / logout / refresh
-    # ------------------------------------------------------------------ #
     async def login(self, db: AsyncSession, form_data: OAuth2PasswordRequestForm) -> TokenResponse:
         user = await user_repo.get_by_email_or_username(db, form_data.username)
         if not user:
@@ -363,9 +354,6 @@ class AuthService:
         await db.commit()
         return tokens
 
-    # ------------------------------------------------------------------ #
-    # Google OAuth
-    # ------------------------------------------------------------------ #
     async def google_exchange(self, db: AsyncSession, code: str) -> TokenResponse:
         if not settings.GOOGLE_CLIENT_ID or not settings.GOOGLE_CLIENT_SECRET:
             raise HTTPException(
@@ -453,7 +441,6 @@ class AuthService:
                 await otp_repo.invalidate_otps(db, user.id, OtpPurpose.REGISTER)
                 await refresh_token_repo.revoke_all_by_user(db, user.id)
 
-
             tokens = await self.issue_tokens(db, user)
             await db.commit()
         except IntegrityError:
@@ -476,9 +463,6 @@ class AuthService:
             refresh_token_expires_at=refresh_expires_at,
         )
 
-    # ------------------------------------------------------------------ #
-    # Forgot / reset password
-    # ------------------------------------------------------------------ #
     async def forgot_password(
         self,
         db: AsyncSession,

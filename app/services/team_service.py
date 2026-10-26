@@ -21,21 +21,33 @@ from app.schemas.team_schema import (
 
 
 class TeamService:
-    def _format_member_response(self, member: TeamMember) -> TeamMemberResponse:
-        positions_list = []
-        for assoc in member.position_associations:
-            if assoc.position:
-                positions_list.append(
-                    TeamMemberPositionResponse(
-                        position_id=assoc.position.id,
-                        sport_type=assoc.position.sport_type,
-                        pitch_type=assoc.position.pitch_type,
-                        code=assoc.position.code,
-                        name=assoc.position.name,
-                        is_primary=assoc.is_primary,
-                    )
-                )
+    @staticmethod
+    def _build_team_response(team: Team, members_count: int = 1) -> TeamResponse:
+        return TeamResponse(
+            id=team.id,
+            name=team.name,
+            description=team.description,
+            avatar_url=team.avatar_url,
+            created_by_id=team.created_by_id,
+            is_active=team.is_active,
+            members_count=members_count,
+            created_at=team.created_at,
+            updated_at=team.updated_at,
+        )
 
+    def _format_member_response(self, member: TeamMember) -> TeamMemberResponse:
+        positions = [
+            TeamMemberPositionResponse(
+                position_id=assoc.position.id,
+                sport_type=assoc.position.sport_type,
+                pitch_type=assoc.position.pitch_type,
+                code=assoc.position.code,
+                name=assoc.position.name,
+                is_primary=assoc.is_primary,
+            )
+            for assoc in member.position_associations
+            if assoc.position
+        ]
         return TeamMemberResponse(
             id=member.id,
             user_id=member.user_id,
@@ -44,8 +56,25 @@ class TeamService:
             role=member.role,
             status=member.status,
             joined_at=member.joined_at,
-            positions=positions_list,
+            positions=positions,
         )
+
+    @staticmethod
+    def _positions_to_response(
+        positions: list,
+        primary_id: int | None = None,
+    ) -> list[TeamMemberPositionResponse]:
+        return [
+            TeamMemberPositionResponse(
+                position_id=p.id,
+                sport_type=p.sport_type,
+                pitch_type=p.pitch_type,
+                code=p.code,
+                name=p.name,
+                is_primary=(p.id == primary_id) if primary_id else False,
+            )
+            for p in positions
+        ]
 
     async def create_team(
         self,
@@ -68,7 +97,7 @@ class TeamService:
             avatar_url=data.avatar_url,
         )
 
-        leader_member = await team_member_repo.create(
+        leader = await team_member_repo.create(
             db,
             team_id=team.id,
             user_id=user_id,
@@ -80,22 +109,11 @@ class TeamService:
             valid_positions = await position_repo.get_by_ids(db, data.my_position_ids)
             valid_ids = [p.id for p in valid_positions]
             if valid_ids:
-                await team_member_repo.set_positions(db, leader_member.id, valid_ids)
+                await team_member_repo.set_positions(db, leader.id, valid_ids)
 
         await db.commit()
         await db.refresh(team)
-
-        return TeamResponse(
-            id=team.id,
-            name=team.name,
-            description=team.description,
-            avatar_url=team.avatar_url,
-            created_by_id=team.created_by_id,
-            is_active=team.is_active,
-            members_count=1,
-            created_at=team.created_at,
-            updated_at=team.updated_at,
-        )
+        return self._build_team_response(team, members_count=1)
 
     async def get_team_detail(
         self,
@@ -111,14 +129,11 @@ class TeamService:
             )
 
         members = await team_member_repo.list_by_team(db, team_id)
-        members_response = [self._format_member_response(m) for m in members]
-
-        my_role = None
-        if current_user_id:
-            for m in members:
-                if m.user_id == current_user_id:
-                    my_role = m.role
-                    break
+        my_role = (
+            next((m.role for m in members if m.user_id == current_user_id), None)
+            if current_user_id
+            else None
+        )
 
         return TeamDetailResponse(
             id=team.id,
@@ -130,7 +145,7 @@ class TeamService:
             members_count=len(members),
             created_at=team.created_at,
             updated_at=team.updated_at,
-            members=members_response,
+            members=[self._format_member_response(m) for m in members],
             my_role=my_role,
         )
 
@@ -142,20 +157,7 @@ class TeamService:
         search: str | None = None,
     ) -> list[TeamResponse]:
         results = await team_repo.list_teams(db, skip=skip, limit=limit, search=search)
-        return [
-            TeamResponse(
-                id=team.id,
-                name=team.name,
-                description=team.description,
-                avatar_url=team.avatar_url,
-                created_by_id=team.created_by_id,
-                is_active=team.is_active,
-                members_count=members_count,
-                created_at=team.created_at,
-                updated_at=team.updated_at,
-            )
-            for team, members_count in results
-        ]
+        return [self._build_team_response(t, count) for t, count in results]
 
     async def list_my_teams(
         self,
@@ -163,20 +165,7 @@ class TeamService:
         user_id: int,
     ) -> list[TeamResponse]:
         results = await team_repo.list_by_user(db, user_id)
-        return [
-            TeamResponse(
-                id=team.id,
-                name=team.name,
-                description=team.description,
-                avatar_url=team.avatar_url,
-                created_by_id=team.created_by_id,
-                is_active=team.is_active,
-                members_count=members_count,
-                created_at=team.created_at,
-                updated_at=team.updated_at,
-            )
-            for team, members_count in results
-        ]
+        return [self._build_team_response(t, count) for t, count in results]
 
     async def update_team(
         self,
@@ -199,31 +188,14 @@ class TeamService:
                 detail="Only team leader or vice leader can update team details",
             )
 
-        update_dict = {}
-        if data.name is not None:
-            update_dict["name"] = data.name
-        if data.description is not None:
-            update_dict["description"] = data.description
-        if data.avatar_url is not None:
-            update_dict["avatar_url"] = data.avatar_url
-
-        if update_dict:
-            await team_repo.update(db, team, **update_dict)
+        update_data = data.model_dump(exclude_unset=True)
+        if update_data:
+            await team_repo.update(db, team, **update_data)
             await db.commit()
             await db.refresh(team)
 
         members = await team_member_repo.list_by_team(db, team_id)
-        return TeamResponse(
-            id=team.id,
-            name=team.name,
-            description=team.description,
-            avatar_url=team.avatar_url,
-            created_by_id=team.created_by_id,
-            is_active=team.is_active,
-            members_count=len(members),
-            created_at=team.created_at,
-            updated_at=team.updated_at,
-        )
+        return self._build_team_response(team, members_count=len(members))
 
     async def delete_team(
         self,
@@ -263,8 +235,8 @@ class TeamService:
                 detail="Team not found",
             )
 
-        requester_membership = await team_member_repo.get_by_team_and_user(db, team_id, current_user_id)
-        if not requester_membership or requester_membership.role not in (TeamRole.LEADER, TeamRole.VICE_LEADER):
+        requester = await team_member_repo.get_by_team_and_user(db, team_id, current_user_id)
+        if not requester or requester.role not in (TeamRole.LEADER, TeamRole.VICE_LEADER):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Only team leader or vice leader can add members",
@@ -282,8 +254,7 @@ class TeamService:
                 detail="Target user not found or inactive",
             )
 
-        existing = await team_member_repo.get_by_team_and_user(db, team_id, target_user.id)
-        if existing:
+        if await team_member_repo.get_by_team_and_user(db, team_id, target_user.id):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="User is already a member of this team",
@@ -295,12 +266,11 @@ class TeamService:
                 detail="Cannot add member directly as leader. Transfer leadership instead.",
             )
 
-        if requester_membership.role == TeamRole.VICE_LEADER and data.role != TeamRole.MEMBER:
+        if requester.role == TeamRole.VICE_LEADER and data.role != TeamRole.MEMBER:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Vice leader can only add regular members",
             )
-
 
         member = await team_member_repo.create(
             db,
@@ -327,17 +297,7 @@ class TeamService:
             role=member.role,
             status=member.status,
             joined_at=member.joined_at,
-            positions=[
-                TeamMemberPositionResponse(
-                    position_id=p.id,
-                    sport_type=p.sport_type,
-                    pitch_type=p.pitch_type,
-                    code=p.code,
-                    name=p.name,
-                    is_primary=False,
-                )
-                for p in valid_positions
-            ],
+            positions=self._positions_to_response(valid_positions),
         )
 
     async def update_member_role(
@@ -355,8 +315,8 @@ class TeamService:
                 detail="Team not found",
             )
 
-        requester_membership = await team_member_repo.get_by_team_and_user(db, team_id, current_user_id)
-        if not requester_membership or requester_membership.role != TeamRole.LEADER:
+        requester = await team_member_repo.get_by_team_and_user(db, team_id, current_user_id)
+        if not requester or requester.role != TeamRole.LEADER:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Only the team leader can change member roles",
@@ -369,16 +329,16 @@ class TeamService:
                 detail="Team member not found in this team",
             )
 
-        if target_member.id == requester_membership.id and new_role != TeamRole.LEADER:
+        if target_member.id == requester.id and new_role != TeamRole.LEADER:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Leader cannot demote themselves directly. Transfer leadership to another member.",
             )
 
         if new_role == TeamRole.LEADER:
-            if target_member.id == requester_membership.id:
+            if target_member.id == requester.id:
                 return self._format_member_response(target_member)
-            await team_member_repo.update_role(db, requester_membership, TeamRole.VICE_LEADER)
+            await team_member_repo.update_role(db, requester, TeamRole.VICE_LEADER)
             await team_member_repo.update_role(db, target_member, TeamRole.LEADER)
         else:
             await team_member_repo.update_role(db, target_member, new_role)
@@ -409,15 +369,15 @@ class TeamService:
                 detail="Team member not found in this team",
             )
 
-        requester_membership = await team_member_repo.get_by_team_and_user(db, team_id, current_user_id)
-        if not requester_membership:
+        requester = await team_member_repo.get_by_team_and_user(db, team_id, current_user_id)
+        if not requester:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You are not a member of this team",
             )
 
         is_self = target_member.user_id == current_user_id
-        is_admin = requester_membership.role in (TeamRole.LEADER, TeamRole.VICE_LEADER)
+        is_admin = requester.role in (TeamRole.LEADER, TeamRole.VICE_LEADER)
         if not is_self and not is_admin:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -443,17 +403,7 @@ class TeamService:
             role=target_member.role,
             status=target_member.status,
             joined_at=target_member.joined_at,
-            positions=[
-                TeamMemberPositionResponse(
-                    position_id=p.id,
-                    sport_type=p.sport_type,
-                    pitch_type=p.pitch_type,
-                    code=p.code,
-                    name=p.name,
-                    is_primary=(p.id == primary_position_id) if primary_position_id else False,
-                )
-                for p in valid_positions
-            ],
+            positions=self._positions_to_response(valid_positions, primary_position_id),
         )
 
     async def remove_member(
@@ -477,16 +427,14 @@ class TeamService:
                 detail="Team member not found in this team",
             )
 
-        requester_membership = await team_member_repo.get_by_team_and_user(db, team_id, current_user_id)
-        if not requester_membership:
+        requester = await team_member_repo.get_by_team_and_user(db, team_id, current_user_id)
+        if not requester:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You are not a member of this team",
             )
 
-        is_self = target_member.user_id == current_user_id
-
-        if is_self:
+        if target_member.user_id == current_user_id:
             if target_member.role == TeamRole.LEADER:
                 all_members = await team_member_repo.list_by_team(db, team_id)
                 if len(all_members) > 1:
@@ -501,23 +449,21 @@ class TeamService:
             await team_member_repo.delete(db, target_member)
             await db.commit()
             return {"message": "Left the team successfully"}
-        else:
-            if requester_membership.role == TeamRole.VICE_LEADER:
-                if target_member.role != TeamRole.MEMBER:
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail="Vice leader can only remove regular members",
-                    )
 
-            elif requester_membership.role != TeamRole.LEADER:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Only team leader or vice leader can remove members",
-                )
+        if requester.role == TeamRole.VICE_LEADER and target_member.role != TeamRole.MEMBER:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Vice leader can only remove regular members",
+            )
+        elif requester.role not in (TeamRole.LEADER, TeamRole.VICE_LEADER):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only team leader or vice leader can remove members",
+            )
 
-            await team_member_repo.delete(db, target_member)
-            await db.commit()
-            return {"message": "Member removed from the team"}
+        await team_member_repo.delete(db, target_member)
+        await db.commit()
+        return {"message": "Member removed from the team"}
 
     async def list_positions(
         self,

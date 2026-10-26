@@ -1,15 +1,18 @@
 import uuid
 from datetime import datetime
 
+from typing import TYPE_CHECKING
 from sqlalchemy import DateTime, ForeignKey, Integer, SmallInteger, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
 
+if TYPE_CHECKING:
+    from app.models.user import User
+
 
 class EmailOtp(Base):
-    """Email OTP model for registration and password reset"""
     __tablename__ = "email_otps"
 
     id: Mapped[uuid.UUID] = mapped_column(
