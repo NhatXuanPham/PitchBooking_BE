@@ -2,7 +2,7 @@ from datetime import date, datetime
 import re
 from typing import Any, Optional
 
-from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from app.models.enum import UserRole
 
@@ -41,7 +41,6 @@ class UserUpdateRequest(BaseModel):
     gender: Optional[str] = Field(None, max_length=20)
     bio: Optional[str] = Field(None, max_length=1000)
     interests: Optional[list[str]] = Field(None, max_length=50)
-    hobbies: Optional[list[str]] = Field(None, max_length=50, description="Alias for interests")
 
     @field_validator("full_name", "phone_number", "address", "avatar_url", "bio", "gender", mode="before")
     @classmethod
@@ -60,10 +59,4 @@ class UserUpdateRequest(BaseModel):
         if not re.match(r"^\+?[0-9]{7,15}$", cleaned):
             raise ValueError("Số điện thoại không hợp lệ (cần từ 7 đến 15 chữ số)")
         return v
-
-    @model_validator(mode="after")
-    def sync_hobbies_to_interests(self) -> "UserUpdateRequest":
-        if self.interests is None and self.hobbies is not None:
-            self.interests = self.hobbies
-        return self
 

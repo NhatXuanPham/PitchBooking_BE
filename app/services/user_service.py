@@ -22,6 +22,11 @@ class UserService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="User not found",
             )
+        if not user.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Account has been disabled",
+            )
         return user
 
     async def get_user_by_id(self, db: AsyncSession, user_id: int) -> User:
@@ -40,7 +45,7 @@ class UserService:
         data: UserUpdateRequest,
     ) -> User:
         user = await self.get_me(db, user_id)
-        update_data = data.model_dump(exclude_unset=True, exclude={"hobbies"})
+        update_data = data.model_dump(exclude_unset=True)
         if not update_data:
             return user
 

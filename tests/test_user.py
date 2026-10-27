@@ -97,17 +97,6 @@ async def test_update_me_all_fields(async_client: AsyncClient, authenticated_use
     assert get_resp.json()["phone_number"] == "0912345678"
 
 
-@pytest.mark.asyncio
-async def test_update_me_alias_hobbies(async_client: AsyncClient, authenticated_user):
-    headers = authenticated_user["auth_headers"]
-    update_payload = {
-        "hobbies": ["Tennis", "Bơi lội"],
-    }
-    response = await async_client.patch("/api/v1/users/me", json=update_payload, headers=headers)
-    assert response.status_code == 200
-    data = response.json()
-    assert data["interests"] == ["Tennis", "Bơi lội"]
-
 
 @pytest.mark.asyncio
 async def test_partial_update_keeps_existing_fields(async_client: AsyncClient, authenticated_user):
@@ -171,3 +160,26 @@ async def test_unauthorized_user_endpoints(async_client: AsyncClient):
 
     resp_patch = await async_client.patch("/api/v1/users/me", json={"full_name": "Test"})
     assert resp_patch.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_get_me_disabled_user(async_client: AsyncClient, authenticated_user):
+    from sqlalchemy import update
+
+    headers = authenticated_user["auth_headers"]
+    email = authenticated_user["identity"]["email"]
+
+    # Disable user in DB
+    async with AsyncSessionLocal() as session:
+        await session.execute(update(User).where(User.email == email).values(is_active=False))
+        await session.commit()
+
+    resp = await async_client.get("/api/v1/users/me", headers=headers)
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "Account has been disabled"
+
+    resp_patch = await async_client.patch(
+        "/api/v1/users/me", json={"full_name": "Test"}, headers=headers
+    )
+    assert resp_patch.status_code == 403
+    assert resp_patch.json()["detail"] == "Account has been disabled"
