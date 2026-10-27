@@ -223,3 +223,86 @@ async def test_google_exchange_requires_matching_state(async_client):
 async def test_old_refreshtoken_path_removed(async_client):
     resp = await async_client.post("/api/v1/auth/refreshtoken", json={"refresh_token": "x"})
     assert resp.status_code == 404
+
+
+
+@pytest.mark.asyncio
+async def test_progressive_registration_flow(async_client, new_identity):
+    # Step 1: Send OTP for email
+    resp = await async_client.post(
+        "/api/v1/auth/send-otp",
+        json={"email": new_identity["email"], "purpose": "REGISTER", "resend": False},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["is_already_sent"] is False
+    email_service.send_registration_otp_email.assert_called_once()
+
+    # Step 2: Verify OTP and get registration token
+    resp = await async_client.post(
+        "/api/v1/auth/register/verify-otp",
+        json={"email": new_identity["email"], "otp": FIXED_OTP},
+    )
+    assert resp.status_code == 200, resp.text
+    reg_token = resp.json()["registration_token"]
+    assert reg_token
+
+    # Step 3: Complete registration by choosing username and password
+    resp = await async_client.post(
+        "/api/v1/auth/register/complete",
+        json={
+            "registration_token": reg_token,
+            "username": new_identity["username"],
+            "password": PASSWORD,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["tokens"]["access_token"]
+
+    # Verify user can login and access /me
+    resp = await _login(async_client, new_identity["username"])
+    assert resp.status_code == 200
+    tokens = resp.json()
+    me = await async_client.get(
+        "/api/v1/users/me",
+        headers={"Authorization": f"Bearer {tokens['access_token']}"},
+    )
+    assert me.status_code == 200
+    assert me.json()["username"] == new_identity["username"]
+    assert me.json()["email"] == new_identity["email"]
+
+
+@pytest.mark.asyncio
+async def test_send_otp_flow(async_client, new_identity):
+    email = new_identity["email"]
+
+    # 1. First send: resend=False -> sends OTP
+    resp = await async_client.post(
+        "/api/v1/auth/send-otp",
+        json={"email": email, "purpose": "REGISTER", "resend": False},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["is_already_sent"] is False
+    assert data["email"] == email
+    email_service.send_registration_otp_email.assert_called_once()
+
+    # 2. Second send: resend=False, OTP still valid -> reports already sent & valid, no new email
+    email_service.send_registration_otp_email.reset_mock()
+    resp2 = await async_client.post(
+        "/api/v1/auth/send-otp",
+        json={"email": email, "purpose": "REGISTER", "resend": False},
+    )
+    assert resp2.status_code == 200, resp2.text
+    data2 = resp2.json()
+    assert data2["is_already_sent"] is True
+    assert data2["expires_in_seconds"] > 0
+    email_service.send_registration_otp_email.assert_not_called()
+
+    # 3. Third send: resend=True while in cooldown -> 429 error
+    resp3 = await async_client.post(
+        "/api/v1/auth/send-otp",
+        json={"email": email, "purpose": "REGISTER", "resend": True},
+    )
+    assert resp3.status_code == 429
+
+

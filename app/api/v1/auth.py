@@ -20,10 +20,15 @@ from app.schemas.auth_schema import (
     GoogleExchangeRequest,
     MessageResponse,
     RefreshTokenRequest,
+    RegisterCompleteRequest,
     RegisterRequest,
     RegisterResponse,
+    RegisterVerifyOtpRequest,
+    RegisterVerifyOtpResponse,
     ResendOtpRequest,
     ResetPasswordRequest,
+    SendOtpRequest,
+    SendOtpResponse,
     TokenResponse,
     VerifyEmailRequest,
     VerifyEmailResponse,
@@ -42,6 +47,49 @@ async def register_user(
     db: AsyncSession = Depends(get_db),
 ):
     return await auth_service.register(db, data, background_tasks)
+
+
+@router.post("/send-otp", response_model=SendOtpResponse)
+@limiter.limit(settings.RATE_LIMIT_SEND_OTP)
+async def send_otp(
+    request: Request,
+    data: SendOtpRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    return await auth_service.send_otp(
+        db,
+        email=data.email,
+        purpose=data.purpose,
+        resend=data.resend,
+        background_tasks=background_tasks,
+    )
+
+
+
+@router.post("/register/verify-otp", response_model=RegisterVerifyOtpResponse)
+@limiter.limit(settings.RATE_LIMIT_VERIFY_OTP)
+async def register_verify_otp(
+    request: Request,
+    data: RegisterVerifyOtpRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    return await auth_service.register_verify_otp(db, data.email, data.otp)
+
+
+@router.post("/register/complete", response_model=VerifyEmailResponse)
+@limiter.limit(settings.RATE_LIMIT_REGISTER)
+async def register_complete(
+    request: Request,
+    response: Response,
+    data: RegisterCompleteRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await auth_service.register_complete(db, data)
+    tokens = result.get("tokens")
+    if tokens:
+        set_auth_cookies(response, tokens.access_token, tokens.refresh_token)
+    return result
 
 
 @router.post("/verify-email", response_model=VerifyEmailResponse)

@@ -34,6 +34,8 @@ def create_token(
         expires_at = now + timedelta(
             minutes=settings.RESET_PASSWORD_TOKEN_EXPIRE_MINUTES
         )
+    elif token_type == "registration":
+        expires_at = now + timedelta(minutes=15)
     else:
         raise ValueError(f"Invalid token_type: {token_type}")
 
@@ -80,6 +82,23 @@ def decode_token(
             detail="Invalid or expired token",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+
+def create_registration_token(email: str) -> str:
+    token, _ = create_token(user_id=email.lower().strip(), token_type="registration")
+    return token
+
+
+def decode_registration_token(token: str) -> str:
+    payload = decode_token(token, token_type="registration")
+    email = payload.get("sub")
+    if not email:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid registration token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return str(email)
 
 
 def verify_access_token(

@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Annotated
 
-from pydantic import AfterValidator, BaseModel, EmailStr, Field
+from pydantic import AfterValidator, BaseModel, EmailStr, Field, field_validator
 
 from app.models.enum import OtpPurpose
 
@@ -66,3 +66,42 @@ class VerifyEmailRequest(BaseModel):
 class ResendOtpRequest(BaseModel):
     email: NormalizedEmail
     purpose: OtpPurpose
+
+
+class SendOtpRequest(BaseModel):
+    email: NormalizedEmail
+    purpose: OtpPurpose = OtpPurpose.REGISTER
+    resend: bool = False
+
+    @field_validator("purpose", mode="before")
+    @classmethod
+    def normalize_purpose(cls, v: str | OtpPurpose) -> OtpPurpose:
+        if isinstance(v, str):
+            v_upper = v.strip().upper()
+            return OtpPurpose(v_upper)
+        return v
+
+
+class SendOtpResponse(BaseModel):
+    message: str
+    email: EmailStr
+    is_already_sent: bool = False
+    cooldown_seconds: int = 0
+    expires_in_seconds: int = 0
+
+
+class RegisterVerifyOtpRequest(BaseModel):
+    email: NormalizedEmail
+    otp: str = Field(..., min_length=6, max_length=6, pattern=r"^\d{6}$")
+
+
+class RegisterVerifyOtpResponse(BaseModel):
+    message: str
+    email: EmailStr
+    registration_token: str
+
+
+class RegisterCompleteRequest(BaseModel):
+    registration_token: str = Field(..., min_length=1)
+    username: str = Field(..., min_length=3, max_length=50, pattern=r"^[A-Za-z0-9_.]+$")
+    password: str = Field(..., min_length=8, max_length=128)

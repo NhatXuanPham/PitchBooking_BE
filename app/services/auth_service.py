@@ -11,7 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.security import (
+    create_registration_token,
     create_token,
+    decode_registration_token,
     generate_otp,
     hash_otp,
     hash_password,
@@ -26,6 +28,7 @@ from app.repositories.token_repo import refresh_token_repo
 from app.repositories.user_repo import user_repo
 from app.schemas.auth_schema import (
     RefreshTokenRequest,
+    RegisterCompleteRequest,
     RegisterRequest,
     TokenResponse,
 )
@@ -49,6 +52,10 @@ def _get_dummy_password_hash() -> str:
     return _dummy_password_hash
 
 
+def _to_utc(dt: datetime) -> datetime:
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
 class AuthService:
     async def _is_in_cooldown(
         self,
@@ -60,7 +67,7 @@ class AuthService:
         latest_otp = await otp_repo.get_latest_otp(db, user_id, purpose)
         if not latest_otp or not latest_otp.created_at:
             return False
-        elapsed = (now - latest_otp.created_at).total_seconds()
+        elapsed = (now - _to_utc(latest_otp.created_at)).total_seconds()
         return elapsed < settings.OTP_RESEND_COOLDOWN_SECONDS
 
     async def _issue_otp(
@@ -133,6 +140,166 @@ class AuthService:
         # Atomic consume: fails if a concurrent request already used/locked this OTP
         if not await otp_repo.mark_as_used(db, otp.id, settings.MAX_OTP_ATTEMPTS):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=OTP_LOCKED_MSG)
+
+    async def _resolve_otp_user(
+        self, db: AsyncSession, email: str, purpose: OtpPurpose
+    ) -> User | None:
+        user = await user_repo.get_by_email(db, email)
+        if purpose == OtpPurpose.REGISTER:
+            if user:
+                if not user.is_active:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Account has been disabled",
+                    )
+                if user.is_email_verified:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Email has already been registered. Please log in.",
+                    )
+                return user
+            user = await user_repo.create(
+                db,
+                username=f"pending_{uuid.uuid4().hex[:12]}",
+                email=email,
+                password_hash=hash_password(uuid.uuid4().hex),
+                is_email_verified=False,
+            )
+            await db.flush()
+            return user
+
+        if purpose == OtpPurpose.RESET_PASSWORD:
+            return user if (user and user.is_active and user.is_email_verified) else None
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unsupported OTP purpose",
+        )
+
+    async def send_otp(
+        self,
+        db: AsyncSession,
+        email: str,
+        purpose: OtpPurpose = OtpPurpose.REGISTER,
+        resend: bool = False,
+        background_tasks: BackgroundTasks | None = None,
+    ) -> dict:
+        email = email.strip().lower()
+        now = datetime.now(timezone.utc)
+
+        user = await self._resolve_otp_user(db, email, purpose)
+        if not user:
+            return {
+                "message": OTP_SENT_GENERIC_MSG,
+                "email": email,
+                "is_already_sent": False,
+                "cooldown_seconds": settings.OTP_RESEND_COOLDOWN_SECONDS,
+                "expires_in_seconds": settings.OTP_EXPIRE_MINUTES * 60,
+            }
+
+        active_otp = await otp_repo.get_latest_active_otp(db, user.id, purpose)
+        latest_otp = await otp_repo.get_latest_otp(db, user.id, purpose)
+
+        cooldown_remaining = 0
+        if latest_otp and latest_otp.created_at:
+            elapsed = (now - _to_utc(latest_otp.created_at)).total_seconds()
+            cooldown_remaining = max(0, int(settings.OTP_RESEND_COOLDOWN_SECONDS - elapsed))
+
+        if not resend and active_otp:
+            exp = _to_utc(active_otp.expires_at)
+            if exp > now and active_otp.attempts < settings.MAX_OTP_ATTEMPTS:
+                return {
+                    "message": "Verification code has already been sent and is still valid. Please check your inbox.",
+                    "email": user.email,
+                    "is_already_sent": True,
+                    "cooldown_seconds": cooldown_remaining,
+                    "expires_in_seconds": max(0, int((exp - now).total_seconds())),
+                }
+
+        if resend and cooldown_remaining > 0:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Please wait {cooldown_remaining} seconds before requesting a new code.",
+            )
+
+        otp_code = await self._issue_otp(db, user, purpose, now)
+        await db.commit()
+        await self._send_otp_email(user, purpose, otp_code, background_tasks)
+
+        return {
+            "message": (
+                "A new verification code has been sent to your email."
+                if resend
+                else "Verification code has been sent to your email."
+            ),
+            "email": user.email,
+            "is_already_sent": False,
+            "cooldown_seconds": settings.OTP_RESEND_COOLDOWN_SECONDS,
+            "expires_in_seconds": settings.OTP_EXPIRE_MINUTES * 60,
+        }
+
+    async def register_verify_otp(
+        self,
+        db: AsyncSession,
+        email: str,
+        otp_code: str,
+    ) -> dict:
+        email = email.strip().lower()
+        user = await user_repo.get_by_email(db, email)
+        if not user or not user.is_active:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=INVALID_OTP_MSG)
+        if user.is_email_verified:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email is already verified. Please log in.",
+            )
+
+        await self._consume_otp(db, user, OtpPurpose.REGISTER, otp_code)
+        await db.commit()
+
+        return {
+            "message": "Email verified successfully. Please choose your username and password.",
+            "email": user.email,
+            "registration_token": create_registration_token(user.email),
+        }
+
+    async def register_complete(
+        self,
+        db: AsyncSession,
+        data: RegisterCompleteRequest,
+    ) -> dict:
+        email = decode_registration_token(data.registration_token)
+        username = data.username.strip()
+
+        existing_username = await user_repo.get_by_username(db, username)
+        user = await user_repo.get_by_email(db, email)
+
+        if not user or not user.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid registration session. Please verify your email again.",
+            )
+
+        if existing_username and existing_username.id != user.id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Username has already been used",
+            )
+
+        user.username = username
+        user.password_hash = hash_password(data.password)
+        user.is_email_verified = True
+        db.add(user)
+        await db.flush()
+
+        tokens = await self.issue_tokens(db, user)
+        await db.commit()
+
+        return {
+            "message": "Account created successfully",
+            "tokens": tokens,
+        }
+
 
     async def register(
         self,
