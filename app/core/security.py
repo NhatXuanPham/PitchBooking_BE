@@ -118,7 +118,7 @@ def verify_access_token(
     )
 
 
-def _cookie_kwargs(path: str = "/") -> dict:
+def cookie_kwargs(path: str = "/") -> dict:
     secure = settings.BACKEND_URL.startswith("https://")
     return {
         "httponly": True,
@@ -138,20 +138,20 @@ def set_auth_cookies(
         key="access_token",
         value=access_token,
         max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-        **_cookie_kwargs(path="/"),
+        **cookie_kwargs(path="/"),
     )
     response.set_cookie(
         key="refresh_token",
         value=refresh_token,
         max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
-        **_cookie_kwargs(path="/"),
+        **cookie_kwargs(path="/"),
     )
 
 
 def delete_auth_cookies(response: Response) -> None:
     """Clear HttpOnly authentication cookies."""
-    response.delete_cookie(key="access_token", **_cookie_kwargs(path="/"))
-    response.delete_cookie(key="refresh_token", **_cookie_kwargs(path="/"))
+    response.delete_cookie(key="access_token", **cookie_kwargs(path="/"))
+    response.delete_cookie(key="refresh_token", **cookie_kwargs(path="/"))
 
 
 def verify_refresh_token(token: str) -> dict:

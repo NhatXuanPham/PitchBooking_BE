@@ -31,17 +31,17 @@ async def authenticated_user(async_client: AsyncClient):
         "password": PASSWORD,
     }
 
-    # Register
-    reg_resp = await async_client.post("/api/v1/auth/register", json=identity)
-    assert reg_resp.status_code == 201
-
-    # Verify email
-    verify_resp = await async_client.post(
-        "/api/v1/auth/verify-email",
-        json={"email": identity["email"], "otp": FIXED_OTP},
+    # Send OTP & Register
+    await async_client.post(
+        "/api/v1/auth/send-otp",
+        json={"email": identity["email"], "purpose": "REGISTER"},
     )
-    assert verify_resp.status_code == 200
-    tokens = verify_resp.json()["tokens"]
+    reg_resp = await async_client.post(
+        "/api/v1/auth/register",
+        json={**identity, "otp": FIXED_OTP},
+    )
+    assert reg_resp.status_code == 201
+    tokens = reg_resp.json()["tokens"]
     token = tokens["access_token"]
 
     yield {"identity": identity, "token": token, "auth_headers": {"Authorization": f"Bearer {token}"}}

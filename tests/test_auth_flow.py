@@ -43,15 +43,15 @@ async def new_identity():
 
 async def _register_and_verify(client: AsyncClient, identity: dict) -> dict:
     resp = await client.post(
-        "/api/v1/auth/register",
-        json={**identity, "password": PASSWORD},
-    )
-    assert resp.status_code == 201, resp.text
-    resp = await client.post(
-        "/api/v1/auth/verify-email",
-        json={"email": identity["email"], "otp": FIXED_OTP},
+        "/api/v1/auth/send-otp",
+        json={"email": identity["email"], "purpose": "REGISTER"},
     )
     assert resp.status_code == 200, resp.text
+    resp = await client.post(
+        "/api/v1/auth/register",
+        json={**identity, "otp": FIXED_OTP, "password": PASSWORD},
+    )
+    assert resp.status_code == 201, resp.text
     return resp.json()["tokens"]
 
 
@@ -64,25 +64,52 @@ async def _login(client: AsyncClient, username: str, password: str = PASSWORD):
 
 @pytest.mark.asyncio
 async def test_full_flow_register_verify_login_refresh_reuse(async_client, new_identity):
-    # Register -> email OTP is "sent"
+    # Step 1: Send OTP
     resp = await async_client.post(
-        "/api/v1/auth/register",
-        json={**new_identity, "password": PASSWORD},
-    )
-    assert resp.status_code == 201, resp.text
-    email_service.send_registration_otp_email.assert_called_once()
-
-    # Login is blocked until the email is verified
-    resp = await _login(async_client, new_identity["username"])
-    assert resp.status_code == 403
-
-    # Verify with the OTP -> auto-login
-    resp = await async_client.post(
-        "/api/v1/auth/verify-email",
-        json={"email": new_identity["email"], "otp": FIXED_OTP},
+        "/api/v1/auth/send-otp",
+        json={"email": new_identity["email"], "purpose": "REGISTER"},
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json()["tokens"]["access_token"]
+    email_service.send_registration_otp_email.assert_called_once()
+
+    # Verify pending user record in database
+    async with AsyncSessionLocal() as session:
+        pending_user = (
+            await session.execute(select(User).where(User.email == new_identity["email"]))
+        ).scalar_one()
+        assert pending_user.username.startswith(new_identity["email"].split("@")[0])
+        assert pending_user.is_active is True
+        assert pending_user.is_email_verified is False
+
+    # Login before completing registration -> 403 "Please verify your email."
+    unverified_login_resp = await _login(async_client, new_identity["email"])
+    assert unverified_login_resp.status_code == 403
+    assert "Please verify your email" in unverified_login_resp.json()["detail"]
+
+    # Step 2: Register with wrong OTP -> 400
+    resp = await async_client.post(
+        "/api/v1/auth/register",
+        json={**new_identity, "otp": "999999", "password": PASSWORD},
+    )
+    assert resp.status_code == 400
+
+    # Step 3: Register with correct OTP -> 201 and auto-login tokens
+    resp = await async_client.post(
+        "/api/v1/auth/register",
+        json={**new_identity, "otp": FIXED_OTP, "password": PASSWORD},
+    )
+    assert resp.status_code == 201, resp.text
+    tokens = resp.json()["tokens"]
+    assert tokens["access_token"]
+
+    # Verify user record is now activated and updated with real username
+    async with AsyncSessionLocal() as session:
+        active_user = (
+            await session.execute(select(User).where(User.email == new_identity["email"]))
+        ).scalar_one()
+        assert active_user.username == new_identity["username"]
+        assert active_user.is_active is True
+        assert active_user.is_email_verified is True
 
     # Login (by email, different case) and call a protected endpoint
     resp = await _login(async_client, new_identity["email"].upper())
@@ -127,12 +154,15 @@ async def test_refresh_tokens_are_stored_hashed(async_client, new_identity):
 @pytest.mark.asyncio
 async def test_email_is_normalized_to_lowercase(async_client, new_identity):
     mixed_case = new_identity["email"].replace("flow_", "FLOW_").replace("example", "Example")
+    await async_client.post(
+        "/api/v1/auth/send-otp",
+        json={"email": mixed_case, "purpose": "REGISTER"},
+    )
     resp = await async_client.post(
         "/api/v1/auth/register",
-        json={"username": new_identity["username"], "email": mixed_case, "password": PASSWORD},
+        json={"username": new_identity["username"], "email": mixed_case, "otp": FIXED_OTP, "password": PASSWORD},
     )
     assert resp.status_code == 201, resp.text
-    assert resp.json()["email"] == new_identity["email"]
 
     async with AsyncSessionLocal() as session:
         user = (
@@ -143,10 +173,13 @@ async def test_email_is_normalized_to_lowercase(async_client, new_identity):
 
 @pytest.mark.asyncio
 async def test_wrong_otp_counts_attempts(async_client, new_identity):
-    await async_client.post("/api/v1/auth/register", json={**new_identity, "password": PASSWORD})
+    await async_client.post(
+        "/api/v1/auth/send-otp",
+        json={"email": new_identity["email"], "purpose": "REGISTER"},
+    )
     resp = await async_client.post(
-        "/api/v1/auth/verify-email",
-        json={"email": new_identity["email"], "otp": "000000"},
+        "/api/v1/auth/register",
+        json={**new_identity, "otp": "000000", "password": PASSWORD},
     )
     assert resp.status_code == 400
     assert "attempts remaining" in resp.json()["detail"]
@@ -170,7 +203,8 @@ async def test_forgot_and_reset_password(async_client, new_identity):
     old_tokens = await _register_and_verify(async_client, new_identity)
 
     resp = await async_client.post(
-        "/api/v1/auth/forgot-password", json={"email": new_identity["email"]}
+        "/api/v1/auth/send-otp",
+        json={"email": new_identity["email"], "purpose": "RESET_PASSWORD"},
     )
     assert resp.status_code == 200
     email_service.send_password_reset_otp_email.assert_called_once()
@@ -227,7 +261,20 @@ async def test_old_refreshtoken_path_removed(async_client):
 
 
 @pytest.mark.asyncio
-async def test_progressive_registration_flow(async_client, new_identity):
+async def test_unified_registration_and_deprecated_endpoints_removed(async_client, new_identity):
+    # Verify deprecated endpoints return 404
+    resp = await async_client.post(
+        "/api/v1/auth/register/verify-otp",
+        json={"email": new_identity["email"], "otp": FIXED_OTP},
+    )
+    assert resp.status_code == 404
+
+    resp = await async_client.post(
+        "/api/v1/auth/register/complete",
+        json={"registration_token": "token", "username": "user", "password": PASSWORD},
+    )
+    assert resp.status_code == 404
+
     # Step 1: Send OTP for email
     resp = await async_client.post(
         "/api/v1/auth/send-otp",
@@ -235,27 +282,18 @@ async def test_progressive_registration_flow(async_client, new_identity):
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["is_already_sent"] is False
-    email_service.send_registration_otp_email.assert_called_once()
 
-    # Step 2: Verify OTP and get registration token
+    # Step 2: Register directly with email, otp, username, password
     resp = await async_client.post(
-        "/api/v1/auth/register/verify-otp",
-        json={"email": new_identity["email"], "otp": FIXED_OTP},
-    )
-    assert resp.status_code == 200, resp.text
-    reg_token = resp.json()["registration_token"]
-    assert reg_token
-
-    # Step 3: Complete registration by choosing username and password
-    resp = await async_client.post(
-        "/api/v1/auth/register/complete",
+        "/api/v1/auth/register",
         json={
-            "registration_token": reg_token,
+            "email": new_identity["email"],
+            "otp": FIXED_OTP,
             "username": new_identity["username"],
             "password": PASSWORD,
         },
     )
-    assert resp.status_code == 200, resp.text
+    assert resp.status_code == 201, resp.text
     assert resp.json()["tokens"]["access_token"]
 
     # Verify user can login and access /me

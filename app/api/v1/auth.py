@@ -11,27 +11,21 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.rate_limit import limiter
 from app.core.security import (
+    cookie_kwargs,
     delete_auth_cookies,
     set_auth_cookies,
     verify_access_token,
 )
 from app.schemas.auth_schema import (
-    ForgotPasswordRequest,
     GoogleExchangeRequest,
     MessageResponse,
     RefreshTokenRequest,
-    RegisterCompleteRequest,
     RegisterRequest,
     RegisterResponse,
-    RegisterVerifyOtpRequest,
-    RegisterVerifyOtpResponse,
-    ResendOtpRequest,
     ResetPasswordRequest,
     SendOtpRequest,
     SendOtpResponse,
     TokenResponse,
-    VerifyEmailRequest,
-    VerifyEmailResponse,
 )
 from app.services.auth_service import auth_service
 
@@ -42,11 +36,15 @@ router = APIRouter()
 @limiter.limit(settings.RATE_LIMIT_REGISTER)
 async def register_user(
     request: Request,
+    response: Response,
     data: RegisterRequest,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
-    return await auth_service.register(db, data, background_tasks)
+    result = await auth_service.register(db, data)
+    tokens = result.get("tokens")
+    if tokens:
+        set_auth_cookies(response, tokens.access_token, tokens.refresh_token)
+    return result
 
 
 @router.post("/send-otp", response_model=SendOtpResponse)
@@ -64,58 +62,6 @@ async def send_otp(
         resend=data.resend,
         background_tasks=background_tasks,
     )
-
-
-
-@router.post("/register/verify-otp", response_model=RegisterVerifyOtpResponse)
-@limiter.limit(settings.RATE_LIMIT_VERIFY_OTP)
-async def register_verify_otp(
-    request: Request,
-    data: RegisterVerifyOtpRequest,
-    db: AsyncSession = Depends(get_db),
-):
-    return await auth_service.register_verify_otp(db, data.email, data.otp)
-
-
-@router.post("/register/complete", response_model=VerifyEmailResponse)
-@limiter.limit(settings.RATE_LIMIT_REGISTER)
-async def register_complete(
-    request: Request,
-    response: Response,
-    data: RegisterCompleteRequest,
-    db: AsyncSession = Depends(get_db),
-):
-    result = await auth_service.register_complete(db, data)
-    tokens = result.get("tokens")
-    if tokens:
-        set_auth_cookies(response, tokens.access_token, tokens.refresh_token)
-    return result
-
-
-@router.post("/verify-email", response_model=VerifyEmailResponse)
-@limiter.limit(settings.RATE_LIMIT_VERIFY_OTP)
-async def verify_email(
-    request: Request,
-    response: Response,
-    data: VerifyEmailRequest,
-    db: AsyncSession = Depends(get_db),
-):
-    result = await auth_service.verify_email(db, data.email, data.otp)
-    tokens = result.get("tokens")
-    if tokens:
-        set_auth_cookies(response, tokens.access_token, tokens.refresh_token)
-    return result
-
-
-@router.post("/resend-otp", response_model=MessageResponse)
-@limiter.limit(settings.RATE_LIMIT_SEND_OTP)
-async def resend_otp(
-    request: Request,
-    data: ResendOtpRequest,
-    background_tasks: BackgroundTasks,
-    db: AsyncSession = Depends(get_db),
-):
-    return await auth_service.resend_otp(db, data.email, data.purpose, background_tasks)
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -186,18 +132,6 @@ async def logout_all(
 _OAUTH_COOKIE_PATH = "/api/v1/auth/google"
 
 
-def _oauth_cookie_kwargs() -> dict:
-    # Cross-site FE/BE in production (https) needs SameSite=None; Secure.
-    # Locally (http) the FE and BE are same-site, so Lax works and Secure must be off.
-    secure = settings.BACKEND_URL.startswith("https://")
-    return {
-        "path": _OAUTH_COOKIE_PATH,
-        "httponly": True,
-        "secure": secure,
-        "samesite": "none" if secure else "lax",
-    }
-
-
 @router.get("/google/login")
 def google_login():
     if not settings.GOOGLE_CLIENT_ID or not settings.GOOGLE_REDIRECT_URI:
@@ -221,7 +155,7 @@ def google_login():
         settings.OAUTH_STATE_COOKIE_NAME,
         state,
         max_age=settings.OAUTH_STATE_MAX_AGE_SECONDS,
-        **_oauth_cookie_kwargs(),
+        **cookie_kwargs(path=_OAUTH_COOKIE_PATH),
     )
     return response
 
@@ -234,8 +168,6 @@ async def google_exchange(
     data: GoogleExchangeRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    # CSRF protection: the state Google echoed back must match the one stored in this
-    # browser's cookie, proving the flow was started by this user (not an attacker's link).
     expected_state = request.cookies.get(settings.OAUTH_STATE_COOKIE_NAME)
     if not expected_state or not hmac.compare_digest(expected_state, data.state):
         raise HTTPException(
@@ -244,21 +176,10 @@ async def google_exchange(
         )
 
     tokens = await auth_service.google_exchange(db, data.code)
-    # State is single-use
-    response.delete_cookie(settings.OAUTH_STATE_COOKIE_NAME, **_oauth_cookie_kwargs())
+    response.delete_cookie(settings.OAUTH_STATE_COOKIE_NAME, **cookie_kwargs(path=_OAUTH_COOKIE_PATH))
     set_auth_cookies(response, tokens.access_token, tokens.refresh_token)
     return tokens
 
-
-@router.post("/forgot-password", response_model=MessageResponse)
-@limiter.limit(settings.RATE_LIMIT_SEND_OTP)
-async def forgot_password(
-    request: Request,
-    data: ForgotPasswordRequest,
-    background_tasks: BackgroundTasks,
-    db: AsyncSession = Depends(get_db),
-):
-    return await auth_service.forgot_password(db, data.email, background_tasks)
 
 
 @router.post("/reset-password", response_model=MessageResponse)

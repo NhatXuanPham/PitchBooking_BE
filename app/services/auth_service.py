@@ -11,9 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.security import (
-    create_registration_token,
     create_token,
-    decode_registration_token,
     generate_otp,
     hash_otp,
     hash_password,
@@ -28,7 +26,6 @@ from app.repositories.token_repo import refresh_token_repo
 from app.repositories.user_repo import user_repo
 from app.schemas.auth_schema import (
     RefreshTokenRequest,
-    RegisterCompleteRequest,
     RegisterRequest,
     TokenResponse,
 )
@@ -38,7 +35,6 @@ logger = logging.getLogger(__name__)
 
 INVALID_OTP_MSG = "Invalid or expired OTP. Please request a new one."
 OTP_LOCKED_MSG = "OTP has expired or exceeded maximum attempts. Please request a new OTP."
-# Generic response so the endpoint does not reveal whether an email is registered
 OTP_SENT_GENERIC_MSG = "If the email is eligible, an OTP has been sent to it."
 
 _dummy_password_hash: str | None = None
@@ -54,6 +50,11 @@ def _get_dummy_password_hash() -> str:
 
 def _to_utc(dt: datetime) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+def _generate_default_username(email: str) -> str:
+    local_part = re.sub(r"[^A-Za-z0-9_.]", "", email.split("@")[0])[:40] or "user"
+    return f"{local_part}_{uuid.uuid4().hex[:6]}"
 
 
 class AuthService:
@@ -101,7 +102,6 @@ class AuthService:
             background_tasks.add_task(send_func, **kwargs)
             return
 
-        # Data is already committed at this point; never fail the request because of SMTP.
         try:
             await send_func(**kwargs)
         except Exception:
@@ -137,7 +137,6 @@ class AuthService:
                 detail=f"Invalid OTP. You have {remaining} attempts remaining.",
             )
 
-        # Atomic consume: fails if a concurrent request already used/locked this OTP
         if not await otp_repo.mark_as_used(db, otp.id, settings.MAX_OTP_ATTEMPTS):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=OTP_LOCKED_MSG)
 
@@ -147,12 +146,12 @@ class AuthService:
         user = await user_repo.get_by_email(db, email)
         if purpose == OtpPurpose.REGISTER:
             if user:
-                if not user.is_active:
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail="Account has been disabled",
-                    )
                 if user.is_email_verified:
+                    if not user.is_active:
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Account has been disabled",
+                        )
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail="Email has already been registered. Please log in.",
@@ -160,9 +159,10 @@ class AuthService:
                 return user
             user = await user_repo.create(
                 db,
-                username=f"pending_{uuid.uuid4().hex[:12]}",
+                username=_generate_default_username(email),
                 email=email,
                 password_hash=hash_password(uuid.uuid4().hex),
+                is_active=True,
                 is_email_verified=False,
             )
             await db.flush()
@@ -238,56 +238,35 @@ class AuthService:
             "expires_in_seconds": settings.OTP_EXPIRE_MINUTES * 60,
         }
 
-    async def register_verify_otp(
+    async def register(
         self,
         db: AsyncSession,
-        email: str,
-        otp_code: str,
+        data: RegisterRequest,
     ) -> dict:
-        email = email.strip().lower()
+        email = data.email.strip().lower()
+        username = data.username.strip()
+
         user = await user_repo.get_by_email(db, email)
-        if not user or not user.is_active:
+        if not user:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=INVALID_OTP_MSG)
         if user.is_email_verified:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Email is already verified. Please log in.",
+                detail="Email has already been registered. Please log in.",
             )
-
-        await self._consume_otp(db, user, OtpPurpose.REGISTER, otp_code)
-        await db.commit()
-
-        return {
-            "message": "Email verified successfully. Please choose your username and password.",
-            "email": user.email,
-            "registration_token": create_registration_token(user.email),
-        }
-
-    async def register_complete(
-        self,
-        db: AsyncSession,
-        data: RegisterCompleteRequest,
-    ) -> dict:
-        email = decode_registration_token(data.registration_token)
-        username = data.username.strip()
 
         existing_username = await user_repo.get_by_username(db, username)
-        user = await user_repo.get_by_email(db, email)
-
-        if not user or not user.is_active:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid registration session. Please verify your email again.",
-            )
-
         if existing_username and existing_username.id != user.id:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Username has already been used",
             )
 
+        await self._consume_otp(db, user, OtpPurpose.REGISTER, data.otp)
+
         user.username = username
         user.password_hash = hash_password(data.password)
+        user.is_active = True
         user.is_email_verified = True
         db.add(user)
         await db.flush()
@@ -301,151 +280,10 @@ class AuthService:
         }
 
 
-    async def register(
-        self,
-        db: AsyncSession,
-        data: RegisterRequest,
-        background_tasks: BackgroundTasks | None = None,
-    ) -> dict:
-        username = data.username.strip()
-        existing_user = await user_repo.get_by_email(db, data.email)
-        if existing_user and existing_user.is_email_verified:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Email has already been registered",
-            )
-
-        # Username is unique at DB level regardless of verification status
-        user_by_username = await user_repo.get_by_username(db, username)
-        if user_by_username and (not existing_user or user_by_username.id != existing_user.id):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Username has already been used",
-            )
-
-        now = datetime.now(timezone.utc)
-        try:
-            if existing_user:
-                if not existing_user.is_active:
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail="Account has been disabled",
-                    )
-                # While a verification code is still pending, do not allow the credentials
-                # to be overwritten. Otherwise a third party could replace the password right
-                # before the real owner enters the OTP from their inbox. Also limits email spam.
-                pending_otp = await otp_repo.get_latest_active_otp(
-                    db, existing_user.id, OtpPurpose.REGISTER
-                )
-                if (
-                    pending_otp
-                    and pending_otp.expires_at > now
-                    and pending_otp.attempts < settings.MAX_OTP_ATTEMPTS
-                ):
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail=(
-                            "A verification code has already been sent to this email. "
-                            "Please verify it or request a new code via resend."
-                        ),
-                    )
-
-                user = existing_user
-                user.username = username
-                user.password_hash = hash_password(data.password)
-                db.add(user)
-                await db.flush()
-            else:
-                user = await user_repo.create(
-                    db,
-                    username=username,
-                    email=data.email,
-                    password_hash=hash_password(data.password),
-                    is_email_verified=False,
-                )
-
-            otp_code = await self._issue_otp(db, user, OtpPurpose.REGISTER, now)
-            await db.commit()
-        except IntegrityError:
-            # Concurrent registration with the same email/username
-            await db.rollback()
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Email or username has already been used",
-            )
-
-        await self._send_otp_email(user, OtpPurpose.REGISTER, otp_code, background_tasks)
-
-        return {
-            "message": "Registration initiated. Please enter the OTP sent to your email to verify your account.",
-            "email": user.email,
-        }
-
-    async def verify_email(
-        self,
-        db: AsyncSession,
-        email: str,
-        otp_code: str,
-    ) -> dict:
-        user = await user_repo.get_by_email(db, email)
-        if not user or not user.is_active:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=INVALID_OTP_MSG)
-        if user.is_email_verified:
-            return {"message": "Email is already verified", "tokens": None}
-
-        await self._consume_otp(db, user, OtpPurpose.REGISTER, otp_code)
-        user.is_email_verified = True
-        db.add(user)
-
-        # Auto-login upon successful verification (same transaction)
-        tokens = await self.issue_tokens(db, user)
-        await db.commit()
-        return {
-            "message": "Email verified successfully",
-            "tokens": tokens,
-        }
-
-    async def resend_otp(
-        self,
-        db: AsyncSession,
-        email: str,
-        purpose: OtpPurpose,
-        background_tasks: BackgroundTasks | None = None,
-    ) -> dict:
-        """
-        Always returns the same generic response so callers cannot probe which emails
-        are registered. Ineligible requests and requests within the cooldown are no-ops.
-        """
-        generic = {"message": OTP_SENT_GENERIC_MSG}
-
-        user = await user_repo.get_by_email(db, email)
-        if not user or not user.is_active:
-            return generic
-        if purpose == OtpPurpose.REGISTER and user.is_email_verified:
-            return generic
-        if purpose == OtpPurpose.RESET_PASSWORD and not user.is_email_verified:
-            return generic
-
-        now = datetime.now(timezone.utc)
-        if await self._is_in_cooldown(db, user.id, purpose, now):
-            return generic
-
-        otp_code = await self._issue_otp(db, user, purpose, now)
-        await db.commit()
-        await self._send_otp_email(user, purpose, otp_code, background_tasks)
-        return generic
-
     async def login(self, db: AsyncSession, form_data: OAuth2PasswordRequestForm) -> TokenResponse:
         user = await user_repo.get_by_email_or_username(db, form_data.username)
         if not user:
-            # Run a hash verification anyway so response time does not reveal unknown users
             verify_password(form_data.password, _get_dummy_password_hash())
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Email or password is incorrect",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        if not verify_password(form_data.password, user.password_hash):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Email or password is incorrect",
@@ -459,7 +297,13 @@ class AuthService:
         if not user.is_email_verified:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Email is not verified. Please verify your email first.",
+                detail="Please verify your email.",
+            )
+        if not verify_password(form_data.password, user.password_hash):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Email or password is incorrect",
+                headers={"WWW-Authenticate": "Bearer"},
             )
 
         tokens = await self.issue_tokens(db, user)
@@ -484,12 +328,10 @@ class AuthService:
         refresh_token_data: RefreshTokenRequest,
     ) -> TokenResponse:
         token = refresh_token_data.refresh_token
-        # Validate JWT signature and expiration
         verify_refresh_token(token)
 
         rt = await refresh_token_repo.get_by_token(db, token)
         if rt and rt.revoked:
-            # Reuse of an already-rotated token: likely stolen, revoke the whole family
             await refresh_token_repo.revoke_all_by_user(db, rt.user_id)
             await db.commit()
         now = datetime.now(timezone.utc)
@@ -511,7 +353,6 @@ class AuthService:
                 detail="Account has been disabled",
             )
 
-        # Refresh token rotation: atomic revoke guards against concurrent reuse
         if not await refresh_token_repo.revoke(db, token):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -569,7 +410,6 @@ class AuthService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Google account must have an email",
             )
-        # Only trust/link the email if Google has verified ownership of it
         if user_info.get("verified_email") is not True:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -577,7 +417,7 @@ class AuthService:
             )
 
         user = await user_repo.get_by_email(db, email)
-        if user and not user.is_active:
+        if user and user.is_email_verified and not user.is_active:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Account has been disabled",
@@ -585,20 +425,21 @@ class AuthService:
 
         try:
             if not user:
-                local_part = re.sub(r"[^A-Za-z0-9_.]", "", email.split("@")[0])[:40] or "user"
                 user = await user_repo.create(
                     db,
-                    username=f"{local_part}_{uuid.uuid4().hex[:6]}",
+                    username=_generate_default_username(email),
                     email=email,
                     password_hash=hash_password(uuid.uuid4().hex),
+                    is_active=True,
                     is_email_verified=True,
                     full_name=user_info.get("name"),
                     avatar_url=user_info.get("picture"),
                 )
             elif not user.is_email_verified:
-                # The unverified account may have been created by someone else using this
-                # email (pre-account takeover). Discard its credentials before linking.
+                user.is_active = True
                 user.is_email_verified = True
+                if "@" in user.username:
+                    user.username = _generate_default_username(email)
                 user.password_hash = hash_password(uuid.uuid4().hex)
                 if not user.full_name and user_info.get("name"):
                     user.full_name = user_info.get("name")
@@ -630,14 +471,6 @@ class AuthService:
             refresh_token_expires_at=refresh_expires_at,
         )
 
-    async def forgot_password(
-        self,
-        db: AsyncSession,
-        email: str,
-        background_tasks: BackgroundTasks | None = None,
-    ) -> dict:
-        return await self.resend_otp(db, email, OtpPurpose.RESET_PASSWORD, background_tasks)
-
     async def reset_password(
         self,
         db: AsyncSession,
@@ -647,7 +480,6 @@ class AuthService:
     ) -> dict:
         user = await user_repo.get_by_email(db, email)
         if not user or not user.is_active or not user.is_email_verified:
-            # Same error as a wrong OTP: does not reveal whether the email exists
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=INVALID_OTP_MSG)
 
         await self._consume_otp(db, user, OtpPurpose.RESET_PASSWORD, otp)

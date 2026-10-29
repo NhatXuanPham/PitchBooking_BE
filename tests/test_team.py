@@ -31,14 +31,12 @@ async def _create_user(client: AsyncClient, prefix: str = "teamuser") -> dict:
         "email": f"{prefix}_{suffix}@example.com",
         "password": PASSWORD,
     }
-    resp = await client.post("/api/v1/auth/register", json=data)
-    assert resp.status_code == 201, resp.text
-
-    resp = await client.post(
-        "/api/v1/auth/verify-email",
-        json={"email": data["email"], "otp": FIXED_OTP},
+    await client.post(
+        "/api/v1/auth/send-otp",
+        json={"email": data["email"], "purpose": "REGISTER"},
     )
-    assert resp.status_code == 200, resp.text
+    resp = await client.post("/api/v1/auth/register", json={**data, "otp": FIXED_OTP})
+    assert resp.status_code == 201, resp.text
     tokens = resp.json()["tokens"]
 
     # Fetch user info
