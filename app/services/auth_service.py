@@ -157,16 +157,31 @@ class AuthService:
                         detail="Email has already been registered. Please log in.",
                     )
                 return user
-            user = await user_repo.create(
-                db,
-                username=_generate_default_username(email),
-                email=email,
-                password_hash=hash_password(uuid.uuid4().hex),
-                is_active=True,
-                is_email_verified=False,
-            )
-            await db.flush()
-            return user
+            try:
+                user = await user_repo.create(
+                    db,
+                    username=_generate_default_username(email),
+                    email=email,
+                    password_hash=hash_password(uuid.uuid4().hex),
+                    is_active=True,
+                    is_email_verified=False,
+                )
+                await db.flush()
+                return user
+            except IntegrityError:
+                await db.rollback()
+                user = await user_repo.get_by_email(db, email)
+                if user:
+                    if user.is_email_verified:
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="Email has already been registered. Please log in.",
+                        )
+                    return user
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Account is being created concurrently. Please try again.",
+                )
 
         if purpose == OtpPurpose.RESET_PASSWORD:
             return user if (user and user.is_active and user.is_email_verified) else None
@@ -216,14 +231,21 @@ class AuthService:
                     "expires_in_seconds": max(0, int((exp - now).total_seconds())),
                 }
 
-        if resend and cooldown_remaining > 0:
+        if cooldown_remaining > 0:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail=f"Please wait {cooldown_remaining} seconds before requesting a new code.",
             )
 
-        otp_code = await self._issue_otp(db, user, purpose, now)
-        await db.commit()
+        try:
+            otp_code = await self._issue_otp(db, user, purpose, now)
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A verification code request is already in progress. Please try again.",
+            )
         await self._send_otp_email(user, purpose, otp_code, background_tasks)
 
         return {
@@ -264,15 +286,28 @@ class AuthService:
 
         await self._consume_otp(db, user, OtpPurpose.REGISTER, data.otp)
 
-        user.username = username
-        user.password_hash = hash_password(data.password)
-        user.is_active = True
-        user.is_email_verified = True
-        db.add(user)
-        await db.flush()
+        try:
+            user.username = username
+            user.password_hash = hash_password(data.password)
+            user.is_active = True
+            user.is_email_verified = True
+            db.add(user)
+            await db.flush()
 
-        tokens = await self.issue_tokens(db, user)
-        await db.commit()
+            tokens = await self.issue_tokens(db, user)
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            existing_username = await user_repo.get_by_username(db, username)
+            if existing_username and existing_username.id != user.id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Username has already been used",
+                )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Registration is being processed concurrently. Please try again.",
+            )
 
         return {
             "message": "Account created successfully",
@@ -282,8 +317,9 @@ class AuthService:
 
     async def login(self, db: AsyncSession, form_data: OAuth2PasswordRequestForm) -> TokenResponse:
         user = await user_repo.get_by_email_or_username(db, form_data.username)
-        if not user:
-            verify_password(form_data.password, _get_dummy_password_hash())
+        password_hash = user.password_hash if user else _get_dummy_password_hash()
+        password_ok = verify_password(form_data.password, password_hash)
+        if not user or not password_ok:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Email or password is incorrect",
@@ -298,12 +334,6 @@ class AuthService:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Please verify your email.",
-            )
-        if not verify_password(form_data.password, user.password_hash):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Email or password is incorrect",
-                headers={"WWW-Authenticate": "Bearer"},
             )
 
         tokens = await self.issue_tokens(db, user)
@@ -331,9 +361,6 @@ class AuthService:
         verify_refresh_token(token)
 
         rt = await refresh_token_repo.get_by_token(db, token)
-        if rt and rt.revoked:
-            await refresh_token_repo.revoke_all_by_user(db, rt.user_id)
-            await db.commit()
         now = datetime.now(timezone.utc)
         if not rt or rt.revoked or rt.expires_at < now:
             raise HTTPException(

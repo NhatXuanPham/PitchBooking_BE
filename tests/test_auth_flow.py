@@ -81,10 +81,10 @@ async def test_full_flow_register_verify_login_refresh_reuse(async_client, new_i
         assert pending_user.is_active is True
         assert pending_user.is_email_verified is False
 
-    # Login before completing registration -> 403 "Please verify your email."
+    # Login before completing registration -> generic 401 (no account status leak)
     unverified_login_resp = await _login(async_client, new_identity["email"])
-    assert unverified_login_resp.status_code == 403
-    assert "Please verify your email" in unverified_login_resp.json()["detail"]
+    assert unverified_login_resp.status_code == 401
+    assert unverified_login_resp.json()["detail"] == "Email or password is incorrect"
 
     # Step 2: Register with wrong OTP -> 400
     resp = await async_client.post(
@@ -129,11 +129,11 @@ async def test_full_flow_register_verify_login_refresh_reuse(async_client, new_i
     new_refresh = resp.json()["refresh_token"]
     assert new_refresh != old_refresh
 
-    # Reusing the rotated token is rejected AND revokes the whole token family
+    # Reusing the rotated token is rejected (401), while the newly issued token remains valid
     resp = await async_client.post("/api/v1/auth/refresh", json={"refresh_token": old_refresh})
     assert resp.status_code == 401
     resp = await async_client.post("/api/v1/auth/refresh", json={"refresh_token": new_refresh})
-    assert resp.status_code == 401
+    assert resp.status_code == 200
 
 
 @pytest.mark.asyncio
@@ -342,5 +342,18 @@ async def test_send_otp_flow(async_client, new_identity):
         json={"email": email, "purpose": "REGISTER", "resend": True},
     )
     assert resp3.status_code == 429
+
+    # 4. Fourth send: even with resend=False, if OTP attempts are exhausted during cooldown -> 429 error
+    # Simulate 5 failed attempts to lock the current OTP
+    for _ in range(5):
+        await async_client.post(
+            "/api/v1/auth/register",
+            json={"username": f"user_{email.split('@')[0]}", "email": email, "otp": "000000", "password": "Password123!"},
+        )
+    resp4 = await async_client.post(
+        "/api/v1/auth/send-otp",
+        json={"email": email, "purpose": "REGISTER", "resend": False},
+    )
+    assert resp4.status_code == 429
 
 

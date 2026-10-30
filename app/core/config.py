@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     FRONTEND_URL: str = "http://localhost:3000"
 
     # Security
-    SECRET_KEY: str = "dev-secret-key-change-in-production"
+    SECRET_KEY: str  # required: set in .env / environment (no default)
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
@@ -52,11 +52,11 @@ class Settings(BaseSettings):
     GOOGLE_CLIENT_SECRET: str | None = None
     GOOGLE_REDIRECT_URI: str | None = None
 
-    @field_validator("SECRET_KEY", mode="before")
+    @field_validator("SECRET_KEY")
     @classmethod
-    def validate_secret_key(cls, v: str | None) -> str:
-        if not v or not str(v).strip():
-            return "dev-secret-key-change-in-production"
+    def validate_secret_key(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("SECRET_KEY must be set to a non-empty value")
         return v
 
     @property
