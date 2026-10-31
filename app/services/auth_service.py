@@ -15,8 +15,8 @@ from app.core.security import (
     generate_otp,
     hash_otp,
     hash_password,
+    verify_and_update_password,
     verify_otp_hash,
-    verify_password,
     verify_refresh_token,
 )
 from app.models.enum import OtpPurpose
@@ -58,19 +58,6 @@ def _generate_default_username(email: str) -> str:
 
 
 class AuthService:
-    async def _is_in_cooldown(
-        self,
-        db: AsyncSession,
-        user_id: int,
-        purpose: OtpPurpose,
-        now: datetime,
-    ) -> bool:
-        latest_otp = await otp_repo.get_latest_otp(db, user_id, purpose)
-        if not latest_otp or not latest_otp.created_at:
-            return False
-        elapsed = (now - _to_utc(latest_otp.created_at)).total_seconds()
-        return elapsed < settings.OTP_RESEND_COOLDOWN_SECONDS
-
     async def _issue_otp(
         self,
         db: AsyncSession,
@@ -318,7 +305,7 @@ class AuthService:
     async def login(self, db: AsyncSession, form_data: OAuth2PasswordRequestForm) -> TokenResponse:
         user = await user_repo.get_by_email_or_username(db, form_data.username)
         password_hash = user.password_hash if user else _get_dummy_password_hash()
-        password_ok = verify_password(form_data.password, password_hash)
+        password_ok, upgraded_hash = verify_and_update_password(form_data.password, password_hash)
         if not user or not password_ok:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -335,6 +322,10 @@ class AuthService:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Please verify your email.",
             )
+
+        if upgraded_hash:
+            user.password_hash = upgraded_hash
+            db.add(user)
 
         tokens = await self.issue_tokens(db, user)
         await db.commit()
@@ -371,8 +362,8 @@ class AuthService:
         user = await user_repo.get_by_id(db, rt.user_id)
         if not user:
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found",
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Refresh token is invalid, expired or revoked",
             )
         if not user.is_active:
             raise HTTPException(
